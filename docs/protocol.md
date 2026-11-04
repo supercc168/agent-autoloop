@@ -66,6 +66,90 @@
 
 排队和等待重试的任务在领取时一起采用最新的 Agent、目录、提示词和权限；换了 Agent 就不带旧 Agent 的会话。已经领取的任务保留领取时的 Job 配置和接单程序，重复 claim、心跳、停止和重启恢复都不随规则更新换人。事件已经归属的事项不重新拆分或合并；回执中的事件许可和通知方式仍按提交时的规则核验。
 
+## 项目任务工作流
+
+普通事件仍走上面的事项/一轮协议。需要跨机器传递明确 Git 版本、独立审核、有限返工和验收时，规则可以选择一个 `workflows` 条目。完整且可执行的云 Hub + 三台 Mac 示例在 [`examples/recipes/project-workflow/`](../examples/recipes/project-workflow/README.md)。
+
+### 可信工作流配置
+
+workflow 固定 `entry`、正整数 `max_transitions`、`stages`、Git 策略、人工选项和可选 `recheck`。每个 stage 固定：
+
+- `route`：已有普通规则的名字，因此同时固定 Agent、worker、`cwd`、prompt/Skill、group 和权限；
+- `mode`：`write` 或 `inspect`；
+- `max_visits`：整个任务（含人工重试和 recheck）累计上限；
+- `on`：每个允许 verdict 到下一 stage 或 `$complete` / `$human` / `$failed` 的完整映射；
+- `checks`：可信的 `{name, argv, timeout_ms}` 参数数组，不经过 shell 插值。
+
+Git 策略固定显式 remote URL/绝对路径、`base_ref`、`task_ref_prefix` 和允许的 `artifact_paths`。任务资料不能提供或覆盖 workflow、worker、目录、项目、身份、权限、命令、仓库、ref、stage 或原生会话。任务接受时冻结完整 workflow/route/Git/check 快照和规则版本；之后改规则只影响新任务。
+
+内置 Lodestar 项目适配器目前只接受显式 `access: full`。`mode: inspect` **不是只读沙箱**：Agent 仍有 full 权限，包装器只在前后核对 HEAD、干净工作树和远端 task ref 没变。需要系统级隔离时使用不同系统账号、容器和 Git 服务端权限。
+
+### 提交、查询、停止和复查
+
+```text
+POST /v1/project-tasks
+Authorization: Bearer <来源或本人的密钥>
+{ "id", "type", "subject", "goal", "acceptance", "data"? }
+
+GET /v1/project-tasks/:task_id
+POST /v1/project-tasks/:task_id/cancel   { "request_id": "稳定编号" }
+POST /v1/project-tasks/:task_id/recheck  { "request_id": "稳定编号" }
+Authorization: Bearer <本人的密钥>
+```
+
+来源密钥只能以自己的来源提交，不能写 `source`；本人密钥可以在正文写一个已配置来源。`id` 在该来源内稳定：同一规范正文返回原任务，不同正文返回 409。cancel/recheck 的 `request_id` 同样幂等，同一个编号不能表示两种动作，也不能重置累计次数。
+
+任务状态是 `queued`、`running`、`waiting_human`、`cancel_requested`、`unknown`、`completed`、`failed`、`cancelled`。`cancel_requested` 只是停止意图；远端原生进程确认停止后才是 `cancelled`。recheck 只在没有 active/unknown execution 且 workflow 配了 `recheck` 时创建新 generation，沿用当前 task ref、历史证据和累计上限。
+
+需要派新 execution 的自动转换、人工决定和 recheck，都必须在消耗本次转换后仍留有一次接收结果的转换预算；重放同一 mutation 不重复计数，也不重置 visits/transitions。旧 run cancel 与 task cancel 对项目任务写入同一套取消事实。
+
+CLI 与 MCP 使用同一接口：
+
+```bash
+agent-autoloop task submit --file task.json --json
+agent-autoloop task status '<task_id>' --json
+agent-autoloop task cancel '<task_id>' --request-id '<stable-id>' --json
+agent-autoloop task recheck '<task_id>' --request-id '<stable-id>' --json
+```
+
+MCP 工具名是 `task_submit`、`task_status`、`task_cancel`、`task_recheck`。它们不创建密钥，也不能绕过来源/本人边界。
+
+### Stage Job、进度和权威回执
+
+项目 stage 仍使用现有 runs 队列。`Job.stage` 带不可变的 `task_id`、`execution_id`、generation、stage id、input revision、workflow/route/Git/check 快照和已接受证据。`Job.context` 将该 task 已接受的 stage 证据和人工决定交给 worker 写入 `context.json`，保留 generation/execution/revision/operator 关联；目标、验收条件、data、findings 和人工文字都只作资料，固定提示词只引用校验后的 id 和资料路径。
+
+原生会话按同一 task、冻结 rules_version、Agent、route 和 mode 选择；这个范围也固定 worker、cwd 和 Lodestar project/identity。相同 review 路线再次执行可以续接，execute→rework、review→verify 不跨私有 clone 续接。新工作区首次启动新会话；已经指定 resume 的恢复失败不能改成 fresh fallback。Lodestar 仍独立校验 binding/provider 和后端实际工作目录。
+
+`POST /v1/runs/:id/started` 可带 `stage` 进度：`execution_id`、`request_id`、remote run/session、input revision、remote state 和非秘密 binding 元数据。第一次接受的 input revision 和原生会话不能换。
+
+owner recheck 为新代次首个 execution 写入可选 `Job.stage.input_resolution: "task_ref"`，授权适配器按冻结的 task_ref_prefix + task_id 解析当前 task ref；普通 stage 只能继承已有来源，不能自行申请解析。此时 `input_revision: null` 表示尚未 pin，不能用旧 current_revision 回填。适配器在模型准入前持久保存实际 locator 与 OID，首次可靠 started 在同一事实事务中登记该代 input/current_revision；后续观察不重新解析。
+
+非空 pin 与 `input_resolution` 一起传给该代重试及后继，包括 review/verify changes_requested 后的 rework/write，直到接受新的 write 输出才切换到不可变 execution ref。带 pin 的 task ref 只允许校验仍指向同一 OID；不能因远端又前进而重新取样，也不要求只读审核方创建 ref。旧代次回执保持不变。确定发生在模型准入前的缺 ref 等失败，可以不带 OID、remote_ref、checks/artifacts，以 execution_failed 结束并等待人工，保留旧 current_revision；准入可能已发生时必须保留 unknown。未 pin 的 confirmed cancellation 也可结束，但成功或携带 OID 的结果不能绕过首次 started admission。
+
+Agent 最后一条完整消息必须以唯一的严格区块结束，后面不能再有正文：
+
+````text
+```agent-autoloop-stage
+{"verdict":"implemented","summary":"…","artifacts":["PLAN.md"],"findings":[]}
+```
+````
+
+本地包装器只读取终态 worker 的 `final_output`，不拿累计过程输出补齐。它从 Git/文件/检查实测构造 `Result.stage`：execution/request id、verdict、原生 run、input/output revision、remote ref、带 SHA-256 的 artifacts、带 revision/exit code 的 checks、findings、diagnostics 和可选 resolution。模型写的 commit、检查或 push 成功不算证据，回执也不能指定下一 stage。
+
+写阶段发布前先持久保存 prepared 记录，包含执行归属、workspace、input/output OID、refs、检查/产物哈希、完整 canonical Result 和 advance/late 模式。崩溃恢复核对这份记录与 Git 后重发同一回执，不重跑模型或业务检查。不可变 ref 只能不存在或等于记录的 output；task ref 只能等于 input，或在 matching execution ref + prepared 证明下等于本次 output。仅 HEAD 碰巧相同不算证明，foreign ref 或记录篡改不能通过。可能已写入但读回失败时保留 pending/unknown；late 模式只留不可变证据，不推进 task ref。
+
+任务 stage 的已知业务/格式/归属/Git 失败使用 `outcome:"done"` + `verdict:"execution_failed"`，进入 workflow 配置的人工/失败路线；**不能**用普通 `outcome:"failed"` 触发通用自动重派。任务回执不能同时提交 ask/resolve/later/events，下一步只由冻结的 workflow 决定。
+
+### 不确定、取消和 operator attestation
+
+每个 stage execution/request id 在传输重试中保持不变。请求是否已准入或远端是否已停止无法确认时，旧 execution 保留为 `unknown` 并继续占用任务槽；wrapper 退出、断线或本机进程组退出都不是远端停止证明。不能换 Mac fresh retry，也不能提交假失败来释放槽位。
+
+observer 心跳只更新在线状态，不清除 unknown 或 run.cancel_at 中的持久取消意图。HTTP 4xx/5xx、一次 404、POST 或 GET 的 failed/completed/cancelled 快照都不是单独的终止证明：适配器必须核对同一 request 的持久 resolved/cancelled 事实与匹配终态，或明确的 operator_attested。request 仍为 pending/admitted/unknown/cancel_requested 时不能返回 finished。重启后空进程 handle 或失败快照也不能推导已停止；已知 run 暂时查不到时继续保留未知执行。
+
+Lodestar 项目请求还用 installation/project/chat/canonical-root 的 `expected_binding` 保护 admission、lookup 和 cancel。项目或安装重新绑定返回冲突，不能把未知请求归给新 owner。取消先持久化 fence，再等待递归停止；完成与取消竞态保留真实 late outcome 并停在人工卡片。
+
+只有本机操作者已在 API 之外核实原生工作停止后，才可用 Lodestar 的独立 operator capability 把 unknown 记为 `operator_attested`。普通 `agent-project-client.json`、worker 和适配器没有这项权限；operator 凭据单独保存在本机 `agent-operator-client.json`。attestation 不是进程证明或业务成功，只保留 provenance 并进入既有人工路线；owner 还要明确选择 retry/resume/fail/cancel，系统不会自动重放业务。命令和完整部署顺序见[项目工作流 recipe](../examples/recipes/project-workflow/README.md)。
+
 ## 来源：把世界变成事件
 
 ```

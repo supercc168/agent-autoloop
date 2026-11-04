@@ -127,9 +127,12 @@ Each recipe includes rules, a task Skill, and setup instructions (written in Chi
 | [User feedback](examples/recipes/feedback/README.md) | Re-read current feedback, fix, deliver and verify, then prepare a reply; ask you in Feishu and resume after your answer |
 | [Website watch](examples/recipes/website-watch/README.md) | Check status and expected content every five minutes; wake the agent on a new incident, keep ongoing failures quiet, and update the card on recovery |
 | [Feishu weekly and business brief](examples/recipes/feishu-brief/README.md) | Read selected reports and tables with your permissions at 6 PM Sunday; summarize locally and send only a short summary to Feishu |
+| [Cloud Hub + three-Mac project workflow](examples/recipes/project-workflow/README.md) | Fixed plan, implementation, independent review, bounded rework, and verification stages with submit/cancel/recheck/recovery guidance |
 | [PR delivery](skills/agent-autoloop/SKILL.md#交付流水线) | Add `deliver` to a PR to review it, wait for CI, merge, wait for deployment, and verify the live version |
 
 **To enable one:** open its instructions, put the task Skill in your agent's skills directory, merge the sample rules into `~/.agent-autoloop/rules.json`, replace worker names and paths, then run `agent-autoloop check`.
+
+For the cloud Hub + three-Mac recipe, follow its role-specific bootstrap order: install the tools on all four hosts with `--hub-only --no-service`; only the Hub keeps rules and runs `check`, while each Mac uses its own worker configuration to verify connectivity and authentication.
 
 Feedback, website watch, and Feishu briefs default to Asia/Shanghai and send only to the owner's private Feishu chat. Sample data is fictional; scripts and receipts have been verified only with local HTTP and a fake Feishu CLI, not run end to end on a live account.
 
@@ -165,7 +168,7 @@ Built-in plugins ship with the program and are enabled through configuration. Us
 
 ## Four kernel mechanisms
 
-The kernel is about 1,650 lines with zero runtime dependencies. It reads no clock, uses no randomness, and makes no outbound requests; plugins connect in, and credentials stay with the plugins that use them. Identical inputs always give identical results. It brings four proven systems patterns to command-line agents:
+The kernel has zero runtime dependencies. It reads no clock, uses no randomness, and makes no outbound requests; plugins connect in, and credentials stay with the plugins that use them. Ordinary matters and bounded project workflows share the fact log, runs queue, cards, and human decisions. Identical inputs always give identical results. It brings four proven systems patterns to command-line agents:
 
 - **Zero-cost wait**: The process exits while waiting for your call, and the waiting state lives in SQLite, so the agent does not stay alive. If you reply three days later, no agent process runs and no tokens are spent in the meantime — only the lightweight hub waits in the background; your answer resumes the original conversation.
 - **Event sourcing**: All state is derived from an append-only fact log, committed in the same SQLite transaction as its indexes before the hub replies. Confirmed facts survive `SIGKILL` (whole-machine power loss is not separately tested), every run can be traced with a single command, and format changes rebuild from the log without migration scripts.
@@ -203,7 +206,6 @@ Apple M5 Pro, 24 GB, Node 24.21.0. Each write is a separate request, acknowledge
 | Durable writes | 2,394 events/s |
 | Dispatch p99 | 1.82 ms |
 | Startup at 1.1 million facts | 99.8 ms |
-| Kernel lines (with comments and blanks) | 1,651 |
 | Runtime dependencies | 0 |
 
 As history grows, the status summary slows down and the log and indexes keep using disk. The first start after a format change rebuilds from the log, which took 43.1 seconds for 1.1 million facts. [Full numbers and method](docs/protocol.md#历史增长实测) (in Chinese).

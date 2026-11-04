@@ -23,7 +23,7 @@ import path from "node:path";
 import { HubError, type Hub } from "../protocol/client.ts";
 import { HOME } from "../host/home.ts";
 import type { Job } from "../protocol/job.ts";
-import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
+import { addUsage, parseResult, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
 
@@ -63,6 +63,12 @@ type Entry = {
   stopping?: number;
   why?: "cancel" | "timeout" | "finished";
   result?: Result;
+  invocation?: string;
+  turnPrompt?: string;
+  managed?: boolean;
+  diagnostic?: string;
+  localStopping?: number;
+  stageTold?: string;
 };
 export type WorkerHub = Pick<Hub, "work" | "started" | "result">;
 export type WorkerOptions = {
@@ -80,6 +86,32 @@ function save(entry: Entry) {
   const file = path.join(entry.dir, "entry.json");
   writeFileSync(`${file}.tmp`, JSON.stringify(entry), { mode: 0o600 });
   renameSync(`${file}.tmp`, file);
+}
+
+function bounded(value: unknown, limit: number) {
+  return Array.from(String(value instanceof Error ? value.message : value))
+    .slice(0, limit)
+    .join("");
+}
+
+/** Known local failure before a task stage can be admitted. It ends the execution without entering legacy auto-retry. */
+function launchFailure(job: Job, error: unknown): Result {
+  const diagnostic = bounded(error, 2_000);
+  if (!job.stage) return { outcome: "failed", error: bounded(error, 500) };
+  return parseResult({
+    outcome: "done",
+    summary: "阶段执行未能在本机启动",
+    stage: {
+      execution_id: job.stage.execution_id,
+      request_id: job.stage.execution_id,
+      verdict: "execution_failed",
+      ...(typeof job.stage.input_revision === "string" ? { input_revision: job.stage.input_revision } : {}),
+      artifacts: [],
+      checks: [],
+      findings: [],
+      diagnostics: [diagnostic],
+    },
+  });
 }
 
 /** What the agent's environment gets: never the hub's secrets, and nothing of a session the worker itself may be in. */
@@ -101,6 +133,7 @@ const files = (entry: Entry) => ({
   out: path.join(entry.dir, `stdout-${entry.turn}.log`),
   err: path.join(entry.dir, `stderr-${entry.turn}.log`),
   exit: path.join(entry.dir, `exit-${entry.turn}`),
+  pid: path.join(entry.dir, `pid-${entry.turn}`),
 });
 const marker = (entry: Entry) => `agent-autoloop-run:${entry.run}:${entry.attempt}:${entry.turn}`;
 
@@ -166,24 +199,17 @@ export function createWorker({
     readdirSync(RUNS).flatMap((id) => {
       try {
         return [JSON.parse(readFileSync(path.join(RUNS, id, "entry.json"), "utf8")) as Entry];
-      } catch {
-        return [];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw new Error(`执行记录 ${id} 损坏，已保留目录；请核对后恢复`, { cause: error });
       }
     });
 
-  /** Starts a turn of the agent: a process that outlives this one, leaving its output and exit code in files. */
-  function launch(entry: Entry, adapter: Adapter, prompt: string) {
-    entry.turn += 1;
-    entry.launchedAt = now();
-    delete entry.finishedAt;
-    delete entry.pid;
-    delete entry.stopping;
-    delete entry.why;
-    save(entry);
+  function turnOf(entry: Entry): Turn {
     const { rule, agent } = entry.job;
     const cwd = rule.cwd.replace(/^~(?=\/)/, homedir());
-    const turn: Turn = {
-      prompt,
+    return {
+      prompt: entry.turnPrompt ?? entry.prompt,
       session: entry.session,
       resume: entry.resume,
       cwd,
@@ -193,17 +219,40 @@ export function createWorker({
       command: agent.command,
       contextFile: path.join(entry.dir, "context.json"),
       folder: entry.dir,
+      invocation: entry.invocation,
+      description: rule.name,
+      ...(entry.job.stage ? { stage: entry.job.stage } : {}),
     };
+  }
+
+  /** Starts a turn of the agent: a process that outlives this one, leaving its output and exit code in files. */
+  function launch(entry: Entry, adapter: Adapter, prompt: string) {
+    entry.turn += 1;
+    entry.invocation = entry.job.stage?.execution_id ?? randomUUID();
+    entry.turnPrompt = prompt;
+    entry.managed = !!adapter.reconcile;
+    entry.launchedAt = now();
+    delete entry.finishedAt;
+    delete entry.pid;
+    delete entry.stopping;
+    delete entry.localStopping;
+    delete entry.why;
+    save(entry);
+    const turn = turnOf(entry);
+    const cwd = turn.cwd;
     if (!existsSync(cwd)) throw new Error(`在 ${cwd} 启动不了：这个目录不存在`);
     const argv = adapter.command(turn);
-    const { out, err, exit } = files(entry);
+    const { out, err, exit, pid } = files(entry);
     // Output and the exit code go through the shell, so they land in their files even if this program has gone by then.
     const script = [
       "out=$1",
       "err=$2",
       "result=$3",
-      "shift 3",
+      "pid=$4",
+      "shift 4",
       "umask 077",
+      'echo $$ >"$pid.tmp"',
+      'mv "$pid.tmp" "$pid"',
       '"$@" >"$out" 2>"$err"',
       'echo $? >"$result.tmp"',
       'mv "$result.tmp" "$result"',
@@ -212,7 +261,7 @@ export function createWorker({
     ].join("\n");
     // The login shell gives it the PATH and sign-in its owner has in a terminal; launchd and systemd give neither.
     const login = [process.env.SHELL ?? "/bin/sh", "-lc", 'exec "$0" "$@"'];
-    const child = spawn("/bin/sh", ["-c", script, marker(entry), out, err, exit, ...login, ...argv], {
+    const child = spawn("/bin/sh", ["-c", script, marker(entry), out, err, exit, pid, ...login, ...argv], {
       cwd,
       env: agentEnvironment(entry),
       detached: true,
@@ -222,7 +271,7 @@ export function createWorker({
     child.unref();
     entry.pid = child.pid;
     save(entry);
-    log(`run ${entry.run} (${rule.name}) turn ${entry.turn} started, pid ${child.pid}`);
+    log(`run ${entry.run} (${entry.job.rule.name}) turn ${entry.turn} started, pid ${child.pid}`);
   }
 
   function endWith(entry: Entry, result: Result) {
@@ -255,7 +304,7 @@ export function createWorker({
       save(entry);
       launch(entry, adapter, entry.prompt);
     } catch (error) {
-      endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
+      endWith(entry, launchFailure(job, error));
     }
   }
 
@@ -279,26 +328,64 @@ export function createWorker({
   }
 
   /** A turn has ended. What it said is a result, or a reason to ask it again without redoing anything. */
-  function conclude(entry: Entry, adapter: Adapter, code: number | null) {
+  function conclude(entry: Entry, adapter: Adapter, code: number | null, observed?: Reading) {
     // One ended because its turn was over but it wouldn't exit said what it had to say first.
-    const seen = read(entry, adapter, entry.finishedAt ? 0 : code);
+    const seen = observed ?? read(entry, adapter, entry.finishedAt ? 0 : code);
     entry.usage = addUsage(entry.usage, seen.usage);
     const session = seen.session ?? (entry.turn > 0 && adapter.link ? entry.session : undefined);
     if (seen.session) entry.session = seen.session;
     const usage = entry.usage && { usage: entry.usage };
     const known = session && { session };
-    if (entry.why === "cancel") return endWith(entry, { outcome: "cancelled", summary: "已停止", ...known, ...usage });
+    if (entry.why === "cancel") {
+      if (entry.job.stage && seen.result?.stage) {
+        try {
+          return endWith(entry, parseResult({ ...seen.result, outcome: "done", ...known, ...usage }));
+        } catch (error) {
+          return endWith(entry, launchFailure(entry.job, error));
+        }
+      }
+      return endWith(entry, {
+        ...seen.result,
+        outcome: "cancelled",
+        summary: seen.result?.summary ?? "已停止",
+        ...known,
+        ...usage,
+      });
+    }
     if (entry.why === "timeout") {
       const minutes = entry.job.agent.timeout ?? TIMEOUT_MINUTES;
       const error = `超过 ${minutes} 分钟还没结束，已停止`;
+      if (entry.job.stage && seen.result?.stage) {
+        try {
+          return endWith(entry, parseResult({ ...seen.result, outcome: "done", ...known, ...usage }));
+        } catch (failure) {
+          return endWith(entry, launchFailure(entry.job, failure));
+        }
+      }
+      if (entry.job.stage) return endWith(entry, launchFailure(entry.job, error));
       if (entry.repairs) return discardReceipt(entry, adapter, error);
       return endWith(entry, { outcome: "failed", error, ...known, ...usage });
+    }
+    if (seen.result) {
+      try {
+        return endWith(entry, parseResult({ ...seen.result, ...known, ...usage }));
+      } catch (error) {
+        return endWith(entry, {
+          outcome: "failed",
+          error: `结构化回执无效：${String(error).slice(0, 400)}`,
+          ...known,
+          ...usage,
+        });
+      }
+    }
+    if (entry.job.stage) {
+      return endWith(entry, launchFailure(entry.job, seen.error ?? "阶段适配器结束时没有提供结构化 stage 结果"));
     }
     if (seen.error !== undefined || !seen.text?.trim()) {
       const error = seen.error || "没留下结果";
       if (entry.repairs) return discardReceipt(entry, adapter, error);
       // The conversation may not be there to go on in, or something else has it open: this go carries on in a new one.
-      if (entry.resume && !entry.triedFresh && entry.repairs === 0) {
+      if (entry.resume && !entry.triedFresh && entry.repairs === 0 && adapter.resumePolicy !== "strict") {
         log(`run ${entry.run}: couldn't go on in ${entry.resume} (${error}); starting a new session`);
         entry.triedFresh = true;
         entry.resume = null;
@@ -316,7 +403,7 @@ export function createWorker({
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
     if (!problem) return endWith(entry, result);
     // Its work is done and only the receipt is wrong: it writes the receipt again, and does nothing again.
-    if (adapter.link && entry.repairs < REPAIRS && seen.session) {
+    if (adapter.resumePolicy !== "strict" && adapter.link && entry.repairs < REPAIRS && seen.session) {
       log(`run ${entry.run}: receipt not readable (${problem}); asking again`);
       entry.repairs += 1;
       entry.resume = seen.session;
@@ -330,6 +417,72 @@ export function createWorker({
     discardReceipt(entry, adapter, problem);
   }
 
+  async function reportObserved(entry: Entry, adapter: Adapter, seen: Reading) {
+    const stageTold = seen.stage ? JSON.stringify(seen.stage) : undefined;
+    if ((seen.session && seen.session !== entry.told) || (stageTold && stageTold !== entry.stageTold)) {
+      try {
+        await hub.started(entry.run, entry.token, {
+          ...(seen.session ? { session: seen.session } : {}),
+          ...(seen.session && adapter.link ? { link: adapter.link(seen.session) } : {}),
+          ...(seen.stage ? { stage: seen.stage } : {}),
+        });
+        if (seen.session) {
+          entry.told = seen.session;
+          entry.session = seen.session;
+        }
+        if (stageTold) entry.stageTold = stageTold;
+        save(entry);
+      } catch (error) {
+        log(`run ${entry.run}: couldn't say it started: ${error}`);
+      }
+    }
+    if (seen.diagnostic && seen.diagnostic !== entry.diagnostic) {
+      entry.diagnostic = seen.diagnostic;
+      save(entry);
+      log(`run ${entry.run}: ${seen.diagnostic}`);
+    }
+  }
+
+  async function checkManaged(entry: Entry, adapter: Adapter) {
+    let seen: Reading;
+    try {
+      seen =
+        entry.stopping !== undefined && entry.why !== "finished"
+          ? adapter.cancel
+            ? await adapter.cancel(turnOf(entry))
+            : { pending: true, diagnostic: "此适配器不能确认取消，保留执行记录" }
+          : groupAlive(entry)
+            ? read(entry, adapter, null)
+            : await adapter.reconcile!(turnOf(entry));
+    } catch (error) {
+      await reportObserved(entry, adapter, { diagnostic: String((error as Error).message ?? error) });
+      return;
+    }
+    await reportObserved(entry, adapter, seen);
+    if (!seen.finished) {
+      if (
+        entry.stopping === undefined &&
+        entry.job.agent.timeout !== undefined &&
+        now() - (entry.launchedAt ?? now()) > entry.job.agent.timeout * 60_000
+      )
+        stop(entry, "timeout");
+      return;
+    }
+    entry.finishedAt ??= now();
+    save(entry);
+    if (groupAlive(entry)) {
+      if (entry.stopping !== undefined || now() - entry.finishedAt > GRACE) {
+        if (entry.localStopping === undefined) {
+          entry.localStopping = now();
+          save(entry);
+          signal(entry, "SIGTERM");
+        } else if (now() - entry.localStopping > STOP_GRACE) signal(entry, "SIGKILL");
+      }
+      return;
+    }
+    return conclude(entry, adapter, null, seen);
+  }
+
   /** Looks at a run in hand: still going, to be stopped, or ended. */
   async function check(entry: Entry) {
     if (entry.result) return;
@@ -337,20 +490,34 @@ export function createWorker({
     try {
       adapter = await adapterFor(entry.job.agent.use);
     } catch (error) {
-      return endWith(entry, { outcome: "failed", error: String((error as Error).message).slice(0, 500) });
+      if (entry.job.stage && entry.turn > 0) {
+        entry.diagnostic = `阶段适配器暂时不可用，保留可能已接纳的执行：${bounded(error, 500)}`;
+        save(entry);
+        log(`run ${entry.run}: ${entry.diagnostic}`);
+        return;
+      }
+      return endWith(entry, launchFailure(entry.job, error));
     }
     if (entry.turn === 0) {
       // The worker stopped while starting it, before anything was launched.
-      if (!entry.prompt) entry.prompt = promptFor(entry.job, path.join(entry.dir, "context.json"));
       try {
+        if (!entry.prompt) entry.prompt = promptFor(entry.job, path.join(entry.dir, "context.json"));
         writeFileSync(path.join(entry.dir, "context.json"), JSON.stringify(entry.job.context, null, 2), {
           mode: 0o600,
         });
         return launch(entry, adapter, entry.prompt);
       } catch (error) {
-        return endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
+        return endWith(entry, launchFailure(entry.job, error));
       }
     }
+    if (!entry.pid && existsSync(files(entry).pid)) {
+      const pid = Number(readFileSync(files(entry).pid, "utf8").trim());
+      if (Number.isSafeInteger(pid) && pid > 0) {
+        entry.pid = pid;
+        save(entry);
+      }
+    }
+    if (adapter.reconcile) return checkManaged(entry, adapter);
     const { exit } = files(entry);
     if (entry.stopping !== undefined) {
       if (groupAlive(entry)) {
@@ -394,7 +561,7 @@ export function createWorker({
     entry.stopping = now();
     entry.why = why;
     save(entry);
-    signal(entry, "SIGTERM");
+    if (!entry.managed) signal(entry, "SIGTERM");
     log(`run ${entry.run}: stopping (${why})`);
   }
 
@@ -408,6 +575,12 @@ export function createWorker({
     } catch (error) {
       if (!(error instanceof HubError) || error.status >= 500) {
         return log(`run ${entry.run}: couldn't hand in the result: ${error}`);
+      }
+      if (entry.job.stage) {
+        entry.diagnostic = `中台拒绝阶段结果，已保留执行记录：${bounded(error, 500)}`;
+        save(entry);
+        log(`run ${entry.run}: ${entry.diagnostic}`);
+        return;
       }
       log(`run ${entry.run}: the hub refused its result (${error.status}: ${error.message}); dropped`);
     }

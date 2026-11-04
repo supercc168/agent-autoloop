@@ -3,6 +3,7 @@ import { credential, type Environment } from "./credentials.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
 import type { Rules } from "./rules.ts";
 import type { Job } from "../protocol/job.ts";
+import type { AcceptedStageEvidence, JobStage, ProjectTaskInput, StageResult } from "../protocol/project-tasks.ts";
 
 export function configuration(view: View, version?: number): Rules {
   const current = view.get("config", "rules");
@@ -84,6 +85,55 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     .sort((a, b) => b.id - a.id)
     .slice(0, 20);
   const timerView = (timer: Row) => ({ key: timer.key, about: timer.about, at: timer.at });
+  const task = run.task_id ? view.get("project_tasks", run.task_id) : undefined;
+  const execution = run.execution_id ? view.get("stage_executions", run.execution_id) : undefined;
+  const taskInput = task ? (JSON.parse(task.input) as ProjectTaskInput) : undefined;
+  const workflow = task ? JSON.parse(task.workflow) : undefined;
+  const taskStage = task && execution ? workflow.stages[execution.stage_id] : undefined;
+  const stageRoute = taskStage ? rules.rules.find((candidate) => candidate.name === taskStage.route) : undefined;
+  const stage: JobStage | undefined =
+    task && execution && taskStage && stageRoute
+      ? {
+          task_id: task.task_id,
+          execution_id: execution.execution_id,
+          generation: execution.generation,
+          stage_id: execution.stage_id,
+          input_revision:
+            execution.input_resolution === "task_ref"
+              ? execution.input_revision
+              : (execution.input_revision ?? task.current_revision),
+          ...(execution.input_resolution === "task_ref" && { input_resolution: "task_ref" as const }),
+          workflow,
+          route: {
+            name: stageRoute.name,
+            agent_id: run.agent,
+            worker: rules.agents[run.agent].worker,
+            cwd: stageRoute.cwd,
+            skill: stageRoute.skill,
+            prompt: stageRoute.prompt,
+            access: rules.agents[run.agent].access,
+          },
+          git: workflow.git,
+          checks: taskStage.checks,
+          evidence: rows(view, "stage_executions", { task_id: task.task_id })
+            .filter((item) => item.state === "finished" && item.result)
+            .map((item) => {
+              const result = JSON.parse(item.result) as StageResult;
+              return {
+                stage_id: item.stage_id,
+                generation: item.generation,
+                execution_id: result.execution_id,
+                verdict: result.verdict,
+                input_revision: result.input_revision,
+                output_revision: result.output_revision,
+                remote_ref: result.remote_ref,
+                artifacts: result.artifacts,
+                checks: result.checks,
+                findings: result.findings,
+              } satisfies AcceptedStageEvidence;
+            }),
+        }
+      : undefined;
   return {
     run: run.id,
     token: credential(env, "run", run.id, run.issued),
@@ -92,7 +142,28 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     agent: { ...rules.agents[run.agent], id: run.agent },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
+    stage,
     context: {
+      ...(taskInput && { task: { ...taskInput, task_id: task!.task_id, source: task!.source } }),
+      ...(stage && {
+        stage_evidence: stage.evidence,
+        task_decisions: rows(view, "cards", { task_id: stage.task_id })
+          .filter((card) => card.answer !== null || card.choice !== null)
+          .map((card) => ({
+            card: card.id,
+            generation: card.task_generation,
+            execution_id: card.task_execution,
+            revision: card.task_revision,
+            title: card.title,
+            options: JSON.parse(card.task_actions),
+            choice: card.choice,
+            text: card.answer,
+            by: card.by,
+            at: card.decided_at,
+            text_by: card.answer_by ?? null,
+            text_at: card.answered_at ?? null,
+          })),
+      }),
       events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
         const sourceName = rules.sources[source]?.name ?? source;
         return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };
@@ -117,9 +188,58 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
   };
 }
 
+export function projectTask(
+  view: View,
+  taskId: string,
+):
+  | (Row & {
+      input: ProjectTaskInput;
+      workflow: any;
+      visits: Record<string, number>;
+      late_outcomes: Row[];
+      executions: Row[];
+      runs: Row[];
+    })
+  | undefined {
+  const task = view.get("project_tasks", taskId);
+  if (!task) return undefined;
+  const executions = rows(view, "stage_executions", { task_id: taskId }).map((execution) => ({
+    ...execution,
+    ...(execution.progress && { progress: JSON.parse(execution.progress) }),
+    ...(execution.result && { result: JSON.parse(execution.result) }),
+  }));
+  const runs = rows(view, "runs", { task_id: taskId }).map(
+    ({ id, state, rule, agent, session, link, created_at, claimed_at, finished_at, summary, error }) => ({
+      id,
+      state,
+      rule,
+      agent,
+      session,
+      link,
+      created_at,
+      claimed_at,
+      finished_at,
+      summary,
+      error,
+    }),
+  );
+  return {
+    ...task,
+    input: JSON.parse(task.input),
+    workflow: JSON.parse(task.workflow),
+    visits: JSON.parse(task.visits),
+    requests: Object.keys(JSON.parse(task.requests ?? "{}")),
+    late_outcomes: JSON.parse(task.late_outcomes ?? "[]"),
+    ...(task.resolution && { resolution: JSON.parse(task.resolution) }),
+    executions,
+    runs,
+  };
+}
+
 export function cancels(view: View, worker: string): number[] {
-  const stopping = (run: Row) => run.state === "claimed" && run.cancel_at !== null && workerOf(view, run) === worker;
-  return rows(view, "runs", { state: "claimed" })
+  const stopping = (run: Row) =>
+    ["claimed", "unknown"].includes(run.state) && run.cancel_at !== null && workerOf(view, run) === worker;
+  return rows(view, "runs", { state: ["claimed", "unknown"] })
     .filter(stopping)
     .map((run) => run.id);
 }

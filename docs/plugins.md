@@ -43,6 +43,41 @@ node --disable-warning=ExperimentalWarning --test --test-name-pattern='agent-aut
 
 只需要打印最后一条消息时，用内置 `command` 加参数数组即可，不必写插件。
 
+### Lodestar 项目工作流适配器
+
+内置 [`plugins/lodestar/`](../plugins/lodestar/) 让独立软件通过本机 Lodestar 项目调用执行可信 stage，并由 Hub 继续使用原 runs 队列。完整云 Hub + 三台 Mac 配置见 [`project-workflow` recipe](../examples/recipes/project-workflow/README.md)。
+
+规则中的 Agent 必须写 `use: "lodestar"`、显式 `access: full`，并提供固定参数数组：
+
+```json
+{
+  "worker": "mac-a",
+  "use": "lodestar",
+  "access": "full",
+  "command": [
+    "--project", "sample-app",
+    "--identity", "<本机 ready identity id>",
+    "--client-file", "/本机私有路径/agent-project-client.json"
+  ]
+}
+```
+
+项目名、identity、client file、目录、Git remote/ref、checks 和权限只能来自可信规则；任务文字不能覆盖。`client-file` 必须是执行 Mac 上的绝对路径，凭据不复制给 Hub、任务资料或另一台 Mac。适配器拒绝受管 Agent 借项目凭据逃离当前会话，也拒绝 `read`/`edit`。
+
+Mac 上的 Lodestar 必须是与本适配器共同验证过的 matching revision。接口前提包括 `/agents/project-binding`、带 `request_id`/`expected_binding` 的 admission/lookup/cancel、`/agents/requests/:id` 的持久 request 状态、终态 worker `final_output` 和独立 operator reconciliation；只会响应 `identities` 的旧 daemon 不够。通道还需要稳定 create key、`PUT /notify/:id`、`transport_state` 查询与回答回调。安装 Autoloop 不会更新或重启现有 Lodestar。
+
+可信根目录必须是干净的 standalone clone，`.git` 和 common Git directory 都留在根目录内；当前不支持 linked worktree。适配器按 task + route + mode 创建私有 clone。Hub 只从同 task、冻结 rules_version、Agent、route、mode 的已知 execution 选择 resume，并由 Lodestar 校验实际 binding/provider/cwd；review 再次执行可续接，execute→rework、review→verify 不跨工作区续接。新工作区首次启动新会话；已选 resume 采用 strict 恢复，不在失败时 fresh fallback。
+
+适配器只用终态 worker 的 `final_output` 解析唯一 `agent-autoloop-stage` 区块，再由本机 Git/检查实测生成结构化 stage 回执。写 stage 要留下已提交且干净的结果；inspect stage 只核对指定版本前后未变化，**不是 read-only sandbox**，实际 Agent 仍以 full 权限运行。独立审核的 Mac C 使用 Git 服务端只读凭据；它不发布 task/execution ref。
+
+owner recheck 的 `input_resolution: "task_ref"` 授权适配器在模型准入前解析并持久 pin 当前可信 task ref，首次 started 将 pin 登记给 Hub。之后该代的观察、重试及尚未接受新 write 输出的后继沿用同一 OID 和 locator 来源，不重新取样；ref 变化就停止本次尝试。确定在准入前缺 ref 可以进入人工 execution_failed，不伪造 OID 或回退旧版本；可能已经执行的情形仍为 unknown。普通 stage 不能由文字、模型回执或未授权的 null revision 请求这种解析。
+
+写结果先测量并保存完整 prepared receipt，再发布不可变 execution ref 与 CAS task ref。发布后丢 reading 时，重新观察只验证 prepared 和远端 Git 事实，重发同一 Result，不重跑模型或检查；foreign ref、prepared 不一致或无法确认的读回不能冒充成功。late 模式只保存不可变证据，不推进 task ref；取消不能撤销已经完成的正常发布。
+
+无论直接 POST 返回终态还是之后 GET 到终态快照，都必须核对同一 request 的持久 resolved/cancelled 与匹配终态，或明确的 operator_attested。pending/admitted/unknown/cancel_requested、HTTP 错误、404、failed 快照或重启后空 handle 都不能单独结束读取；普通 worker 心跳也不会清掉 unknown 或取消意图。未知执行继续占槽，不能自动重放业务。
+
+`plugins/lodestar/channel.ts` 是另一条独立插件缝：它把 Hub 卡片经本机 Lodestar notify 发到飞书。配置选项只有 `instance`、`project`、`client_file`；通道必须运行在能读取该本机文件和 loopback daemon 的 Mac 上，不能放在云 Hub 后再访问 Mac 的 `localhost`。稳定 create key 不含卡片版本；`PUT` 的 unknown 结果只轮询，不盲目重发。回调把真实 operator、原始 message ref 和 applied version 交给 Hub，Hub 拒绝的回答保持可重试。
+
 ### 浏览器接入
 
 浏览器工具装在运行 Agent 的电脑上，由该 CLI 的工具配置或项目 Skill 提供。Codex 插件启动的是后台 [`codex exec`](https://developers.openai.com/codex/noninteractive/)；可以使用它已配置的 [MCP 工具](https://developers.openai.com/codex/mcp/)，不能只凭桌面应用能打开网页就认定后台也能访问同一浏览器。

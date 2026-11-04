@@ -8,13 +8,48 @@ export type Channel = { name: string; answerers?: string[]; links?: boolean };
 export type Tell = "always" | "needed" | "never";
 type EventFilter = { source: string; types: string[] };
 type When = EventFilter | { cron: string };
-type RuleOptions = { skill?: string; prompt?: string; parallel?: number; emits?: EventFilter };
+type RuleOptions = { skill?: string; prompt?: string; parallel?: number; emits?: EventFilter; workflow?: string };
 /** Without parallel a rule's group runs one at a time; with it, each subject is its own thread, that many at once. */
 export type Rule = RuleOptions & { name: string; when: When; to: string; cwd: string; group: string; tell: Tell };
+export type StageMode = "write" | "inspect";
+export type WorkflowTarget = string | "$complete" | "$human" | "$failed";
+export type WorkflowCheck = { name: string; argv: string[]; timeout_ms: number };
+export type WorkflowStage = {
+  route: string;
+  mode: StageMode;
+  max_visits: number;
+  on: Record<string, WorkflowTarget>;
+  checks: WorkflowCheck[];
+};
+export type WorkflowGit = {
+  remote: string;
+  base_ref: string;
+  task_ref_prefix: string;
+  artifact_paths: string[];
+};
+export type WorkflowHumanOption = {
+  label: string;
+  action: "resume" | "retry" | "fail" | "cancel";
+  stage?: string;
+};
+export type Workflow = {
+  entry: string;
+  max_transitions: number;
+  stages: Record<string, WorkflowStage>;
+  git: WorkflowGit;
+  recheck?: string;
+  human: { options: WorkflowHumanOption[] };
+};
 /** A scheduled task that runs elsewhere (say, in the Claude app): the hub neither starts nor records it. */
 export type Elsewhere = { name: string; source: string; to: string; cron: string; where: string };
 type Registered = { sources: Record<string, Source>; agents: Record<string, Agent>; channels: Record<string, Channel> };
-export type Rules = Registered & { timezone: string; askFirst: string[]; rules: Rule[]; elsewhere: Elsewhere[] };
+export type Rules = Registered & {
+  timezone: string;
+  askFirst: string[];
+  rules: Rule[];
+  workflows: Record<string, Workflow>;
+  elsewhere: Elsewhere[];
+};
 
 /** The source of what the clock makes happen. */
 export const SCHEDULE = "schedule";

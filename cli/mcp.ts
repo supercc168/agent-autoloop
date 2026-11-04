@@ -2,6 +2,7 @@
 import { createInterface } from "node:readline";
 import { readConfig } from "../host/config.ts";
 import { hubClient, type Hub } from "../protocol/client.ts";
+import { parseProjectTaskInput } from "../protocol/project-tasks.ts";
 
 const positive = { type: "integer", minimum: 1 };
 const string = { type: "string", minLength: 1 };
@@ -23,31 +24,82 @@ const specs = [
     ["id", "type"],
   ],
   ["tell", "用本机来源发送通知；相同编号只发一次", { key: string, text: string }, ["key", "text"]],
+  [
+    "task_submit",
+    "登记项目任务；重试沿用同一 id，验收条件与资料不改变执行路由",
+    {
+      id: { ...string, maxLength: 200 },
+      type: string,
+      subject: { type: "string", maxLength: 100 },
+      goal: { ...string, maxLength: 20_000 },
+      acceptance: { type: "array", minItems: 1, maxItems: 100, items: { ...string, maxLength: 2000 } },
+      data: {},
+      source: string,
+    },
+    ["id", "type", "subject", "goal", "acceptance"],
+  ],
+  ["task_status", "查看项目任务的阶段、证据和实际状态", { task_id: string }, ["task_id"]],
+  [
+    "task_cancel",
+    "请求停止项目任务；状态可能仍是正在停止或待核对",
+    { task_id: string, request_id: { ...string, maxLength: 200 } },
+    ["task_id", "request_id"],
+  ],
+  [
+    "task_recheck",
+    "复查已登记项目任务；重试沿用同一 request_id",
+    { task_id: string, request_id: { ...string, maxLength: 200 } },
+    ["task_id", "request_id"],
+  ],
 ] as const;
 
 const usesSourceKey = (name: string) => ["emit", "tell"].includes(name);
 
 function toolsFor(config: ReturnType<typeof readConfig>) {
   return specs
-    .filter(([name]) => (usesSourceKey(name) ? config.source : config.owner))
+    .filter(([name]) =>
+      name === "task_submit" ? config.source || config.owner : usesSourceKey(name) ? config.source : config.owner,
+    )
     .map(([name, description, properties, required]) => ({
       name,
       description,
-      inputSchema: { type: "object", properties, required, additionalProperties: false },
-      annotations: { readOnlyHint: ["status", "why"].includes(name), destructiveHint: name === "stop" },
+      inputSchema: {
+        type: "object",
+        properties,
+        required: [...required, ...(name === "task_submit" && !config.source ? ["source"] : [])],
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: ["status", "why", "task_status"].includes(name),
+        destructiveHint: ["stop", "task_cancel"].includes(name),
+      },
     }));
 }
 type Tool = ReturnType<typeof toolsFor>[number];
 
-function validArguments(tool: Tool, args: any) {
+function validArguments(tool: Tool, args: any, config: ReturnType<typeof readConfig>) {
   if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  if (tool.name === "task_submit") {
+    const useOwner = args.source !== undefined || !config.source;
+    if (useOwner && !config.owner) return false;
+    try {
+      parseProjectTaskInput(args, useOwner);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (!tool.inputSchema.required.every((key) => Object.hasOwn(args, key))) return false;
   const properties = tool.inputSchema.properties as Record<string, any>;
   const fits = ([key, value]: [string, unknown]) => {
     const schema = properties[key];
     if (!schema) return false;
     if (schema.type === "integer") return Number.isSafeInteger(value) && (value as number) >= schema.minimum;
-    return typeof value === "string" && value.trim().length > 0;
+    return (
+      typeof value === "string" &&
+      value.trim().length > 0 &&
+      (schema.maxLength === undefined || [...value].length <= schema.maxLength)
+    );
   };
   if (!Object.entries(args).every(fits)) return false;
   return tool.name !== "answer" || (args.choice !== undefined) !== (args.text !== undefined);
@@ -71,6 +123,14 @@ function callTool(hub: Hub, name: Tool["name"], args: any) {
       return hub.event(args);
     case "tell":
       return hub.tell(args);
+    case "task_submit":
+      return hub.submitProjectTask(args);
+    case "task_status":
+      return hub.projectTask(args.task_id);
+    case "task_cancel":
+      return hub.cancelProjectTask(args.task_id, { request_id: args.request_id });
+    case "task_recheck":
+      return hub.recheckProjectTask(args.task_id, { request_id: args.request_id });
   }
 }
 
@@ -85,8 +145,10 @@ export async function mcp() {
   async function answerCall(id: unknown, params: any) {
     const tool = tools.find((tool) => tool.name === params?.name);
     const args = params?.arguments ?? {};
-    if (!tool || !validArguments(tool, args)) return refuse(id, -32602, "工具名或参数不正确");
-    const hub = hubClient(config.url, usesSourceKey(tool.name) ? config.source!.key : config.owner!);
+    if (!tool || !validArguments(tool, args, config)) return refuse(id, -32602, "工具名或参数不正确");
+    const source =
+      usesSourceKey(tool.name) || (tool.name === "task_submit" && args.source === undefined && !!config.source);
+    const hub = hubClient(config.url, source ? config.source!.key : config.owner!);
     try {
       const result = await callTool(hub, tool.name, args);
       reply(id, { result: { content: [{ type: "text", text: JSON.stringify(result) }] } });

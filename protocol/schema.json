@@ -230,6 +230,124 @@
         }
       ]
     },
+    "project-task": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+        "type": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$" },
+        "subject": { "type": "string", "maxLength": 100, "pattern": "^[A-Za-z0-9#._:\\/@-]*$" },
+        "goal": { "type": "string", "minLength": 1, "maxLength": 20000, "pattern": "\\S" },
+        "acceptance": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "data": {},
+        "source": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" }
+      },
+      "required": ["id", "type", "subject", "goal", "acceptance"],
+      "additionalProperties": false
+    },
+    "stage-progress": {
+      "type": "object",
+      "properties": {
+        "execution_id": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "remote_run_id": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+        "input_revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "remote_state": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "\\S" },
+        "binding": {
+          "type": "object",
+          "properties": {
+            "binding_id": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "installation_id": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "worker": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "project": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "provider": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "identity": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "workdir": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" },
+            "chat": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["execution_id", "request_id"],
+      "additionalProperties": false
+    },
+    "stage-result": {
+      "type": "object",
+      "properties": {
+        "execution_id": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "verdict": {
+          "enum": ["planned", "implemented", "approved", "changes_requested", "verified", "blocked", "execution_failed"]
+        },
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 300, "pattern": "\\S" },
+        "remote_run_id": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+        "input_revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "output_revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "remote_ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9][A-Za-z0-9._/-]*$" },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" },
+              "revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            },
+            "required": ["path", "revision", "sha256"],
+            "additionalProperties": false
+          }
+        },
+        "checks": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\S" },
+              "exit_code": { "type": "integer" },
+              "revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" }
+            },
+            "required": ["name", "exit_code", "revision"],
+            "additionalProperties": false
+          }
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": { "enum": ["blocking", "warning", "info"] },
+              "summary": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }
+            },
+            "required": ["severity", "summary"],
+            "additionalProperties": false
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" }
+        },
+        "resolution": {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "operator_attested" },
+            "reason": { "type": "string", "minLength": 1, "maxLength": 2000, "pattern": "\\S" },
+            "at": { "type": "string", "format": "date-time" },
+            "binding_id": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S" }
+          },
+          "required": ["kind", "reason", "at", "binding_id"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["execution_id", "verdict", "request_id", "artifacts", "checks", "findings"],
+      "additionalProperties": false
+    },
     "result": {
       "type": "object",
       "properties": {
@@ -285,6 +403,9 @@
             "$ref": "#/$defs/event"
           },
           "maxItems": 100
+        },
+        "stage": {
+          "$ref": "#/$defs/stage-result"
         }
       },
       "required": ["outcome"],
@@ -300,10 +421,13 @@
         "link": {
           "type": "string",
           "maxLength": 500
+        },
+        "stage": {
+          "$ref": "#/$defs/stage-progress"
         }
       },
       "required": [],
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "answer": {
       "type": "object",
@@ -538,6 +662,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "stage": {
+          "type": "object"
         }
       },
       "required": ["run", "token", "attempt", "rule", "agent", "session", "askFirst", "context"],

@@ -1,6 +1,7 @@
 // The protocol's own checks, with no state behind them: the hub applies them at its door, and a worker applies them to
 // an Agent's receipt before handing it in, while the Agent can still be asked to write it again.
 import { InputError } from "../kernel/errors.ts";
+import { parseStageProgress, parseStageResult, type StageProgress, type StageResult } from "./project-tasks.ts";
 
 export const EVENT_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
 export type Later = { key: string; at?: string; about?: string; cancel?: boolean };
@@ -27,7 +28,9 @@ export type Result = {
   resolve?: { card: number; reason: string }[];
   later?: Later[];
   events?: EventInput[];
+  stage?: StageResult;
 };
+export type Started = { session?: string; link?: string; stage?: StageProgress };
 export type Rejected = { card?: number; what?: string; reason: string };
 
 export type EventInput = {
@@ -146,7 +149,19 @@ export function parseResult(input: unknown): Result {
   }
   const result = { ...input } as Item;
   if (
-    !only(result, ["outcome", "summary", "error", "session", "usage", "ask", "notice", "resolve", "later", "events"])
+    !only(result, [
+      "outcome",
+      "summary",
+      "error",
+      "session",
+      "usage",
+      "ask",
+      "notice",
+      "resolve",
+      "later",
+      "events",
+      "stage",
+    ])
   ) {
     throw new InputError("结果里有不认识的字段");
   }
@@ -171,5 +186,20 @@ export function parseResult(input: unknown): Result {
     if (!items(result.events, 100)) throw new InputError("events 最多 100 项");
     result.events = result.events.map(parseEvent);
   }
+  if (result.stage !== undefined) result.stage = parseStageResult(result.stage);
   return result as Result;
+}
+
+export function parseStarted(input: unknown): Started {
+  if (!isItem(input)) throw new InputError("started 要是一个 JSON 对象");
+  const given = input as Item;
+  if (!only(given, ["session", "link", "stage"])) throw new InputError("started 有不认识的字段");
+  if (!optional(given.session, 500) || !optional(given.link, 500)) {
+    throw new InputError("started 的 session 和 link 最多 500 字");
+  }
+  return {
+    ...(given.session !== undefined && { session: given.session as string }),
+    ...(given.link !== undefined && { link: given.link as string }),
+    ...(given.stage !== undefined && { stage: parseStageProgress(given.stage) }),
+  };
 }

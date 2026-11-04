@@ -6,7 +6,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { loadPlugin } from "../host/plugins.ts";
-import type { Usage } from "../protocol/validate.ts";
+import type { Result, Usage } from "../protocol/validate.ts";
+import type { JobStage, StageProgress } from "../protocol/project-tasks.ts";
 
 export type { Usage } from "../protocol/validate.ts";
 export type Access = "read" | "edit" | "full";
@@ -22,8 +23,24 @@ export type Turn = {
   command?: string[];
   contextFile: string;
   folder: string;
+  /** Stable across a lost wrapper or a worker restart, different for an intentional new turn. */
+  invocation?: string;
+  description?: string;
+  /** Trusted immutable stage snapshot; ordinary runs omit it. */
+  stage?: JobStage;
 };
-export type Reading = { text?: string; session?: string; usage?: Usage; error?: string; finished?: boolean };
+export type Reading = {
+  text?: string;
+  session?: string;
+  usage?: Usage;
+  error?: string;
+  finished?: boolean;
+  result?: Result;
+  pending?: boolean;
+  diagnostic?: string;
+  /** Durable progress for a stage execution; it never completes the run. */
+  stage?: StageProgress;
+};
 export type Adapter = {
   /** Its command line for this turn. */
   command(turn: Turn): string[];
@@ -33,6 +50,10 @@ export type Adapter = {
   link?(session: string): string;
   /** Whether it's installed and signed in: what's wrong, in words a person can act on, or nothing. */
   check?(): string | null;
+  resumePolicy?: "strict";
+  /** A remote execution stays reserved until these hooks confirm its termination. */
+  reconcile?(turn: Turn): Promise<Reading>;
+  cancel?(turn: Turn): Promise<Reading>;
 };
 
 const adapters = new Map<string, Adapter>();

@@ -1,0 +1,47 @@
+{
+  "cloud": {
+    "url": "http://127.0.0.1:3350",
+    "hub": {
+      "listen": "127.0.0.1:3350",
+      "publicUrl": "https://hub.example.invalid"
+    },
+    "owner": "REPLACE_WITH_OWNER_KEY",
+    "source": {
+      "name": "projects",
+      "key": "REPLACE_WITH_PROJECT_SOURCE_KEY"
+    }
+  },
+  "mac-a": {
+    "url": "https://hub.example.invalid",
+    "worker": {
+      "name": "mac-a",
+      "key": "REPLACE_WITH_MAC_A_WORKER_KEY",
+      "capacity": 1
+    }
+  },
+  "mac-b": {
+    "url": "https://hub.example.invalid",
+    "worker": {
+      "name": "mac-b",
+      "key": "REPLACE_WITH_MAC_B_WORKER_KEY",
+      "capacity": 1
+    }
+  },
+  "mac-c": {
+    "url": "https://hub.example.invalid",
+    "worker": {
+      "name": "mac-c",
+      "key": "REPLACE_WITH_MAC_C_WORKER_KEY",
+      "capacity": 1
+    },
+    "channels": {
+      "project-cards": {
+        "use": "lodestar",
+        "key": "REPLACE_WITH_PROJECT_CARDS_CHANNEL_KEY",
+        "instance": "mac-c-project-cards",
+        "project": "sample-app",
+        "client_file": "/Users/agent-review/.local/share/lodestar/agent-project-client.json"
+      }
+    }
+  }
+}

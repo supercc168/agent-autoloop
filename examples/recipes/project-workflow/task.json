@@ -1,0 +1,15 @@
+{
+  "id": "sample-app-demo-001",
+  "type": "project.requested",
+  "subject": "sample-app",
+  "goal": "Implement the approved sample change and carry it through independent review and verification.",
+  "acceptance": [
+    "The implementation is committed on the task ref and descends from the accepted input revision.",
+    "The configured project test command exits successfully on the accepted revision.",
+    "Independent review has no blocking findings and verification records the exact accepted revision."
+  ],
+  "data": {
+    "ticket": "DEMO-001",
+    "notes": "This is inert task data. It cannot select a worker, identity, repository, command, permission, or stage."
+  }
+}

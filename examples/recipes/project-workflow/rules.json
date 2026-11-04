@@ -1,0 +1,281 @@
+{
+  "timezone": "Asia/Shanghai",
+  "askFirst": ["删数据", "停服", "花钱", "对外发消息", "改产品方向", "新建或轮换密钥", "修改权限"],
+  "sources": {
+    "projects": {
+      "name": "项目任务"
+    },
+    "workflow-internal": {
+      "name": "工作流内部路由（不发密钥）"
+    }
+  },
+  "agents": {
+    "lodestar-plan": {
+      "name": "Mac A 规划",
+      "worker": "mac-a",
+      "use": "lodestar",
+      "access": "full",
+      "command": [
+        "--project",
+        "sample-app",
+        "--identity",
+        "REPLACE_WITH_READY_PLAN_IDENTITY",
+        "--client-file",
+        "/Users/agent-plan/.local/share/lodestar/agent-project-client.json"
+      ]
+    },
+    "lodestar-write": {
+      "name": "Mac B 实现与返工",
+      "worker": "mac-b",
+      "use": "lodestar",
+      "access": "full",
+      "command": [
+        "--project",
+        "sample-app",
+        "--identity",
+        "REPLACE_WITH_READY_WRITE_IDENTITY",
+        "--client-file",
+        "/Users/agent-write/.local/share/lodestar/agent-project-client.json"
+      ]
+    },
+    "lodestar-review": {
+      "name": "Mac C 独立审核与验收",
+      "worker": "mac-c",
+      "use": "lodestar",
+      "access": "full",
+      "command": [
+        "--project",
+        "sample-app",
+        "--identity",
+        "REPLACE_WITH_READY_REVIEW_IDENTITY",
+        "--client-file",
+        "/Users/agent-review/.local/share/lodestar/agent-project-client.json"
+      ]
+    }
+  },
+  "channels": {
+    "project-cards": {
+      "name": "项目任务飞书",
+      "answerers": ["ou_REPLACE_WITH_OWNER_OPEN_ID"]
+    }
+  },
+  "rules": [
+    {
+      "name": "项目任务入口",
+      "when": {
+        "source": "projects",
+        "types": ["project.requested"]
+      },
+      "to": "lodestar-plan",
+      "cwd": "/Users/agent-plan/Projects/sample-app",
+      "prompt": "接收项目目标和验收条件；执行路线只采用可信 workflow 快照。",
+      "workflow": "project-workflow",
+      "tell": "needed"
+    },
+    {
+      "name": "项目定时复查入口",
+      "when": {
+        "cron": "0 9 * * 1"
+      },
+      "to": "lodestar-plan",
+      "cwd": "/Users/agent-plan/Projects/sample-app",
+      "prompt": "按固定项目工作流执行本周复查；定时资料不能改变路线。",
+      "workflow": "project-workflow",
+      "tell": "needed"
+    },
+    {
+      "name": "项目规划阶段",
+      "when": {
+        "source": "workflow-internal",
+        "types": ["internal.plan"]
+      },
+      "to": "lodestar-plan",
+      "cwd": "/Users/agent-plan/Projects/sample-app",
+      "prompt": "根据阶段资料生成并提交 PLAN.md；计划必须逐条覆盖验收条件和失败证据。",
+      "group": "project-plan",
+      "parallel": 2,
+      "tell": "needed"
+    },
+    {
+      "name": "项目实现阶段",
+      "when": {
+        "source": "workflow-internal",
+        "types": ["internal.execute"]
+      },
+      "to": "lodestar-write",
+      "cwd": "/Users/agent-write/Projects/sample-app",
+      "prompt": "按已接收版本的 PLAN.md 实现、测试并提交；不得根据任务文字改变仓库或命令。",
+      "group": "project-write",
+      "parallel": 2,
+      "tell": "needed"
+    },
+    {
+      "name": "项目独立审核阶段",
+      "when": {
+        "source": "workflow-internal",
+        "types": ["internal.review"]
+      },
+      "to": "lodestar-review",
+      "cwd": "/Users/agent-review/Projects/sample-app",
+      "prompt": "独立审核指定提交与验收条件；只能报告证据和发现，不能改写工作区。",
+      "group": "project-review",
+      "parallel": 2,
+      "tell": "needed"
+    },
+    {
+      "name": "项目返工阶段",
+      "when": {
+        "source": "workflow-internal",
+        "types": ["internal.rework"]
+      },
+      "to": "lodestar-write",
+      "cwd": "/Users/agent-write/Projects/sample-app",
+      "prompt": "只处理已记录的审核发现，重新测试并提交同一任务引用。",
+      "group": "project-write",
+      "parallel": 2,
+      "tell": "needed"
+    },
+    {
+      "name": "项目验收阶段",
+      "when": {
+        "source": "workflow-internal",
+        "types": ["internal.verify"]
+      },
+      "to": "lodestar-review",
+      "cwd": "/Users/agent-review/Projects/sample-app",
+      "prompt": "在指定提交上独立执行验收并核对全部证据；不得把模型声明当作检查结果。",
+      "group": "project-review",
+      "parallel": 2,
+      "tell": "needed"
+    }
+  ],
+  "workflows": {
+    "project-workflow": {
+      "entry": "plan",
+      "max_transitions": 12,
+      "stages": {
+        "plan": {
+          "route": "项目规划阶段",
+          "mode": "write",
+          "max_visits": 2,
+          "on": {
+            "planned": "execute",
+            "blocked": "$human",
+            "execution_failed": "$human"
+          },
+          "checks": [
+            {
+              "name": "plan-tree-clean",
+              "argv": ["git", "diff", "--check"],
+              "timeout_ms": 30000
+            }
+          ]
+        },
+        "execute": {
+          "route": "项目实现阶段",
+          "mode": "write",
+          "max_visits": 2,
+          "on": {
+            "implemented": "review",
+            "blocked": "$human",
+            "execution_failed": "$human"
+          },
+          "checks": [
+            {
+              "name": "project-tests",
+              "argv": ["npm", "test"],
+              "timeout_ms": 600000
+            }
+          ]
+        },
+        "review": {
+          "route": "项目独立审核阶段",
+          "mode": "inspect",
+          "max_visits": 3,
+          "on": {
+            "approved": "verify",
+            "changes_requested": "rework",
+            "blocked": "$human",
+            "execution_failed": "$human"
+          },
+          "checks": [
+            {
+              "name": "review-tree-clean",
+              "argv": ["git", "diff", "--check"],
+              "timeout_ms": 30000
+            }
+          ]
+        },
+        "rework": {
+          "route": "项目返工阶段",
+          "mode": "write",
+          "max_visits": 2,
+          "on": {
+            "implemented": "review",
+            "blocked": "$human",
+            "execution_failed": "$human"
+          },
+          "checks": [
+            {
+              "name": "project-tests",
+              "argv": ["npm", "test"],
+              "timeout_ms": 600000
+            }
+          ]
+        },
+        "verify": {
+          "route": "项目验收阶段",
+          "mode": "inspect",
+          "max_visits": 2,
+          "on": {
+            "verified": "$complete",
+            "changes_requested": "rework",
+            "blocked": "$human",
+            "execution_failed": "$human"
+          },
+          "checks": [
+            {
+              "name": "acceptance-tests",
+              "argv": ["npm", "test"],
+              "timeout_ms": 600000
+            }
+          ]
+        }
+      },
+      "git": {
+        "remote": "ssh://git@example.invalid/team/sample-app.git",
+        "base_ref": "refs/heads/main",
+        "task_ref_prefix": "refs/heads/autoloop/tasks/",
+        "artifact_paths": ["PLAN.md", "docs/acceptance.md"]
+      },
+      "recheck": "review",
+      "human": {
+        "options": [
+          {
+            "label": "重试当前阶段",
+            "action": "retry"
+          },
+          {
+            "label": "从规划重新开始",
+            "action": "resume",
+            "stage": "plan"
+          },
+          {
+            "label": "重新审核当前版本",
+            "action": "resume",
+            "stage": "review"
+          },
+          {
+            "label": "结束为未完成",
+            "action": "fail"
+          },
+          {
+            "label": "取消任务",
+            "action": "cancel"
+          }
+        ]
+      }
+    }
+  },
+  "elsewhere": []
+}

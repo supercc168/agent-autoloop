@@ -6,15 +6,20 @@ import { join } from "node:path";
 
 const edits: [string, string, string, string][] = [
   ["event-duplicate", "decide.ts", "if (existing) return { event:", "if (false && existing) return { event:"],
-  ["source-boundary", "decide.ts", "rule.when.source === source", "true"],
+  [
+    "source-boundary",
+    "decide.ts",
+    "!rule.workflow && eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type)",
+    "!rule.workflow && eventRule(rule) && true && typeMatches(rule.when.types, event.type)",
+  ],
   ["parallel-lane", "decide.ts", 'const lane = rule.parallel ? subject : ""', 'const lane = ""'],
   ["group-capacity", "decide.ts", "claimed.filter((other) => other.grp === run.grp).length <", "0 <"],
   ["lane-exclusion", "decide.ts", "!claimed.some((other) => other.grp === run.grp && other.lane === run.lane)", "true"],
   [
     "worker-boundary",
     "decide.ts",
-    'run.state === "queued" &&\n    agents.includes(ruleNamed(draft, run.rule)?.to ?? "")',
-    'run.state === "queued" &&\n    true',
+    '(run.task_id ? workerOf(draft.view, run) === worker : agents.includes(ruleNamed(draft, run.rule)?.to ?? ""))',
+    "true",
   ],
   ["retry-delay", "decide.ts", "5 * MINUTE * 2 ** (attempts - 1)", "0 * MINUTE * 2 ** (attempts - 1)"],
   [
@@ -25,7 +30,12 @@ const edits: [string, string, string, string][] = [
   ],
   ["receipt-conflict", "decide.ts", "if (prior.last_result !== hash)", "if (false)"],
   ["run-capability", "decide.ts", 'credential(draft.env, "run", id, run.issued) !== token', "false"],
-  ["answer-first", "decide.ts", 'if (card.state !== "open")', "if (false)"],
+  [
+    "answer-first",
+    "decide.ts",
+    'if (card.state !== "open") return { changed: false, state: card.state };',
+    "if (false) return { changed: false, state: card.state };",
+  ],
   ["answer-person", "decide.ts", 'if (allowed && !allowed.includes(given.by ?? ""))', "if (false)"],
   ["answer-message", "decide.ts", "if (!delivery?.ref || delivery.ref !== given.ref)", "if (false)"],
   [
@@ -62,6 +72,16 @@ const edits: [string, string, string, string][] = [
   ["transaction-removed", "store.ts", "return transaction(db, () => {", "return ((work) => work())(() => {"],
 ];
 const tests = ["kernel", "events", "cards", "runs", "schedule", "stream", "purity"].map((n) => `tests/${n}.test.ts`);
+
+export function applyMutation(name: string, text: string) {
+  const edit = edits.find(([candidate]) => candidate === name);
+  if (!edit) throw new Error(`unknown mutation: ${name}`);
+  const before = edit[2];
+  const matches = text.split(before).length - 1;
+  assert.equal(matches, 1, `${name}: expected exactly one mutation anchor, found ${matches}`);
+  return text.replace(before, edit[3]);
+}
+
 export function mutate() {
   const root = join(import.meta.dirname, "..");
   const folder = mkdtempSync(join(tmpdir(), "agent-autoloop-mutation-"));
@@ -82,13 +102,10 @@ export function mutate() {
     const baseline = run();
     assert.equal(baseline.status, 0, baseline.stdout + baseline.stderr);
     assert.ok(Number(/# tests (\d+)/.exec(baseline.stdout)?.[1]) > 50, "基线必须确实执行行为测试");
-    const mutations = edits.map(([name, file, before, after]) => ({
+    const mutations = edits.map(([name, file]) => ({
       name,
       file,
-      change: (text: string) => {
-        assert.ok(text.includes(before), name);
-        return text.replace(before, after);
-      },
+      change: (text: string) => applyMutation(name, text),
     }));
     const survived: string[] = [];
     const invalid: string[] = [];

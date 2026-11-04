@@ -20,6 +20,8 @@ export type Card = {
 };
 export type ChannelContext = {
   hub: Pick<Hub, "nextCard" | "delivered" | "failed" | "answer">;
+  /** Canonical configured Hub URL, used only for durable cross-Hub transport identity. */
+  hubOrigin?: string;
   options: Record<string, unknown>;
   log: (line: string) => void;
   signal: AbortSignal;

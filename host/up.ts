@@ -40,10 +40,11 @@ async function keepChannelRunning(
   signal: AbortSignal,
 ) {
   const say = log(id);
+  const hubOrigin = new URL(url).toString().replace(/\/+$/, "");
   while (!signal.aborted) {
     try {
       const start = await loadChannel(use ?? id);
-      await start({ hub: hubClient(url, key), options, log: say, signal });
+      await start({ hub: hubClient(url, key), hubOrigin, options, log: say, signal });
     } catch (error) {
       say(`stopped: ${error}; starting again in 30 seconds`);
       await new Promise((resolve) => setTimeout(resolve, 30_000));

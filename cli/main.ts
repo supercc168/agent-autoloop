@@ -11,6 +11,7 @@ import { HOME, RULES_FILE } from "../host/home.ts";
 import { installService, removeService, serviceRunning } from "../host/service.ts";
 import { versionLine } from "../host/version.ts";
 import { spendLine } from "./spend.ts";
+import { parseProjectTaskInput } from "../protocol/project-tasks.ts";
 
 const ROOT = path.join(import.meta.dirname, "..");
 const PROGRAM = path.join(ROOT, "bin", "agent-autoloop.ts");
@@ -19,6 +20,8 @@ const HELP = `Agent 自动化中台
 
   agent-autoloop init [--agent claude|codex] [--command '某个命令 {prompt}'] [--port 3350] [--no-service]
                                     在这台电脑上装好：一个人一台电脑就够
+  agent-autoloop init --hub-only [--listen 127.0.0.1:3350] [--public-url https://中台地址] [--no-service]
+                                    只安装云中台，不需要本机模型
   agent-autoloop try                     用你的 Agent 跑一遍完整流程
   agent-autoloop why <第几轮> [--json]  查看时间线；--json 输出原始事实
   agent-autoloop conformance <地址> --config <测试凭据文件>
@@ -34,6 +37,11 @@ const HELP = `Agent 自动化中台
   agent-autoloop tell <编号> [--task 定时任务名]
                                     直接告诉你一件事，内容从标准输入读
   agent-autoloop stop <第几轮>           停掉一轮
+  agent-autoloop task submit [--file 任务.json] [--source 来源] [--json]
+                                    登记项目任务；省略文件则从标准输入读取 JSON，重试沿用 id
+  agent-autoloop task status <任务编号> [--json]
+  agent-autoloop task cancel|recheck <任务编号> --request-id <固定请求编号> [--json]
+                                    查看、停止或复查项目任务
   agent-autoloop key new <source|worker|channel|owner> <名字>
                                     新建一把密钥（只显示这一次）
   agent-autoloop key list                有哪些密钥
@@ -152,38 +160,83 @@ async function agentsToUse(named: Flags, worker: string) {
 async function init(args: string[]) {
   const { named } = flags(args);
   if (existsSync(CONFIG_FILE)) return fail(`已经装过了：${CONFIG_FILE}`);
+  const hubOnly = named["hub-only"] !== undefined;
+  if (hubOnly && (named["hub-only"] !== true || named.agent !== undefined || named.command !== undefined)) {
+    return fail("--hub-only 不接参数，也不能同时选择本机 Agent 或 command");
+  }
+  const requestedPort = text(named.port) ?? "3350";
+  const listen = text(named.listen) ?? `127.0.0.1:${requestedPort}`;
+  const address = /^([a-zA-Z0-9.-]+):(\d+)$/.exec(listen);
+  if (
+    (named.listen !== undefined && !text(named.listen)) ||
+    !address ||
+    Number(address[2]) < 1 ||
+    Number(address[2]) > 65535
+  ) {
+    return fail("listen 需要主机名或 IPv4 地址加有效端口，例如 127.0.0.1:3350");
+  }
+  if (named.listen !== undefined && named.port !== undefined && address[2] !== requestedPort)
+    return fail("listen 与 port 的端口不一致");
+  const url = `http://${address[1] === "0.0.0.0" ? "127.0.0.1" : address[1]}:${address[2]}`;
+  const publicUrl = text(named["public-url"]) ?? url;
+  try {
+    const parsed = new URL(publicUrl);
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      (named["public-url"] !== undefined && !text(named["public-url"]))
+    )
+      throw new Error();
+  } catch {
+    return fail("public-url 需要不含账号、查询参数或片段的 HTTP(S) 地址");
+  }
   mkdirSync(HOME, { recursive: true, mode: 0o700 });
-  mkdirSync(path.join(HOME, "try"), { recursive: true });
+  if (!hubOnly) mkdirSync(path.join(HOME, "try"), { recursive: true });
   const hostName = hostname()
     .toLowerCase()
     .replace(/\.local$/, "");
   const worker = hostName.replace(/[^a-z0-9-]/g, "-").replace(/^[^a-z]+/, "") || "this-machine";
-  const agents = await agentsToUse(named, worker);
-  if (!Object.keys(agents).length) {
+  const agents = hubOnly ? {} : await agentsToUse(named, worker);
+  if (!hubOnly && !Object.keys(agents).length) {
     return fail(
       "这台电脑上没找到 Claude Code 或 Codex。先装好并登录，" +
         "或者用 --command 指定别的命令行 Agent，比如 --command 'hermes chat -q {prompt}'",
     );
   }
-  const port = text(named.port) ?? "3350";
-  const url = `http://127.0.0.1:${port}`;
   const ownRules = !existsSync(RULES_FILE);
   if (ownRules) {
-    writeFileSync(RULES_FILE, `${JSON.stringify(starterRules(agents, Object.keys(agents)[0]), null, 2)}\n`);
+    const initial = hubOnly
+      ? { sources: { local: { name: "本机" } }, agents: {}, channels: {}, rules: [], elsewhere: [] }
+      : starterRules(agents, Object.keys(agents)[0]);
+    writeFileSync(RULES_FILE, `${JSON.stringify(initial, null, 2)}\n`);
   }
-  const { addKey } = await import("../host/runtime.ts");
+  const { addKey, rules: loadedRules } = await import("../host/runtime.ts");
+  const sourceName = hubOnly
+    ? Object.hasOwn(loadedRules.sources, "local")
+      ? "local"
+      : Object.keys(loadedRules.sources).find((name) => name !== "schedule")
+    : "local";
   const config: Config = {
     url,
-    hub: { listen: `127.0.0.1:${port}`, publicUrl: url },
-    worker: { name: worker, key: addKey("worker", worker) },
-    source: { name: "local", key: addKey("source", "local") },
+    hub: { listen, publicUrl },
+    ...(!hubOnly && { worker: { name: worker, key: addKey("worker", worker) } }),
+    ...(sourceName && { source: { name: sourceName, key: addKey("source", sourceName) } }),
     owner: addKey("owner", "owner"),
     // A channel only rules.json knows about, or only this file, would do nothing: it's on only if both are ours to write.
-    ...(ownRules && { channels: { desktop: { key: addKey("channel", "desktop") } } }),
+    ...(ownRules && !hubOnly && { channels: { desktop: { key: addKey("channel", "desktop") } } }),
   };
   writeConfig(config);
-  linkSkill();
+  if (!hubOnly) linkSkill();
   if (!named["no-service"]) installService();
+  if (hubOnly) {
+    console.log(
+      `云中台已配置。\n  监听：${listen}\n  对外地址：${publicUrl}\n  规则：${RULES_FILE}\n\n${named["no-service"] ? `运行 ${howToRun()} up 启动中台。` : "系统服务已配置。"}请登记远端 worker 和任务规则，再为每个 worker 创建独立密钥。`,
+    );
+    return;
+  }
   const names = Object.values(agents).map((agent) => agent.name);
   const reach = ownRules ? "  通道：桌面通知\n" : "";
   const run = howToRun();
@@ -491,6 +544,91 @@ async function stop(args: string[]) {
   console.log("通知它停了。");
 }
 
+async function projectTask(args: string[]) {
+  const [action, ...inputArgs] = args;
+  if (!["submit", "status", "cancel", "recheck"].includes(action))
+    return fail("用法：task submit|status|cancel|recheck");
+  const values = new Map<string, string | true>();
+  const positional: string[] = [];
+  for (let i = 0; i < inputArgs.length; i++) {
+    const argument = inputArgs[i];
+    if (!argument.startsWith("--")) {
+      positional.push(argument);
+      continue;
+    }
+    const allowed =
+      action === "submit"
+        ? ["--json", "--file", "--source"]
+        : action === "status"
+          ? ["--json"]
+          : ["--json", "--request-id"];
+    if (!allowed.includes(argument) || values.has(argument)) return fail(`不支持或重复的参数：${argument}`);
+    if (argument === "--json") values.set(argument, true);
+    else {
+      const value = inputArgs[++i];
+      if (!value?.trim() || value.startsWith("--")) return fail(`${argument} 需要一个值`);
+      values.set(argument, value);
+    }
+  }
+  const config = readConfig();
+  let result: any;
+  if (action === "submit") {
+    if (positional.length) return fail("task submit 使用 --file 或标准输入提供任务 JSON");
+    const file = values.get("--file");
+    let body: any;
+    try {
+      body = JSON.parse(readFileSync(typeof file === "string" ? file : 0, "utf8"));
+    } catch {
+      return fail("任务输入必须是合法的 JSON 对象");
+    }
+    const source = values.get("--source");
+    if (typeof source === "string") {
+      if (
+        !body ||
+        typeof body !== "object" ||
+        Array.isArray(body) ||
+        (body.source !== undefined && body.source !== source)
+      )
+        return fail("source 与任务 JSON 不一致");
+      body.source = source;
+    }
+    const useOwner = body?.source !== undefined || !config.source;
+    if (useOwner && !config.owner) return fail("指定 source 提交需要本人的密钥");
+    if (!useOwner && !config.source) return fail("这台电脑没有可提交任务的来源");
+    const parsed = parseProjectTaskInput(body, useOwner);
+    result = await hubClient(config.url, useOwner ? config.owner! : config.source!.key).submitProjectTask(parsed);
+  } else {
+    if (positional.length !== 1 || !positional[0].trim()) return fail(`task ${action} 需要一个任务编号`);
+    const hub = ownerClient(config);
+    if (action === "status") result = await hub.projectTask(positional[0]);
+    else {
+      const requestId = values.get("--request-id");
+      if (typeof requestId !== "string" || !requestId.trim() || [...requestId].length > 200)
+        return fail("--request-id 必填，重试使用同一个请求编号，最多 200 个字");
+      const request = { request_id: requestId };
+      result =
+        action === "cancel"
+          ? await hub.cancelProjectTask(positional[0], request)
+          : await hub.recheckProjectTask(positional[0], request);
+    }
+  }
+  if (values.has("--json")) return console.log(JSON.stringify(result, null, 2));
+  const labels: Record<string, string> = {
+    queued: "待执行",
+    running: "执行中",
+    waiting_human: "等待决定",
+    cancel_requested: "正在停止",
+    unknown: "状态待核对",
+    completed: "已验收",
+    failed: "未完成",
+    cancelled: "已停止",
+  };
+  const state = result.state ?? result.task?.state;
+  console.log(
+    `项目任务 ${result.task_id ?? positional[0]}：${labels[state] ?? state ?? "已登记"}${result.duplicate ? "（同一请求已记录）" : ""}`,
+  );
+}
+
 function service(args: string[]) {
   if (args[0] === "install") return installService();
   if (args[0] === "remove") return removeService();
@@ -546,6 +684,7 @@ const commands: Record<string, () => unknown> = {
   emit: () => emit(args),
   tell: () => tell(args),
   stop: () => stop(args),
+  task: () => projectTask(args),
   update,
   uninstall: async () => {
     const { uninstall } = await import("./uninstall.ts");

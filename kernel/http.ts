@@ -3,7 +3,8 @@ import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import type { Row, View } from "./evolve.ts";
-import { agentsOf, cancels, cardView, configuration } from "./query.ts";
+import { agentsOf, cancels, cardView, configuration, projectTask } from "./query.ts";
+import { parseProjectTaskInput } from "../protocol/project-tasks.ts";
 
 export type Services = {
   now(): number;
@@ -137,6 +138,30 @@ async function tell(call: Call) {
   return json(act(call, "tell", `elsewhere:${task.name}:${input.key}`, task.name, text));
 }
 
+async function submitProjectTask(call: Call) {
+  const source = keyHolder(call, "source");
+  const owner = source ? null : keyHolder(call, "owner");
+  if (!source && !owner) throw new AuthError("要来源或本人自己的密钥");
+  const input = await readJson(call.request);
+  if (source) return json(act(call, "submitProjectTask", source, input));
+  const parsed = parseProjectTaskInput(input, true);
+  const { source: selected, ...task } = parsed;
+  return json(act(call, "submitProjectTask", selected, task));
+}
+
+function taskStatus(call: Call, taskId: string) {
+  requireKey(call, "owner");
+  const task = projectTask(call.services.view(), taskId);
+  if (!task) throw new NotFound("没有这个项目任务");
+  return json(task);
+}
+
+async function taskMutation(call: Call, taskId: string, action: "cancel" | "recheck") {
+  requireKey(call, "owner");
+  const input = await readJson(call.request);
+  return json(act(call, action === "cancel" ? "cancelProjectTask" : "recheckProjectTask", taskId, input));
+}
+
 async function work(call: Call) {
   const { services, request, url, token } = call;
   const worker = requireKey(call, "worker");
@@ -218,6 +243,13 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && hook) return webhook(call, hook[1]);
   if (method === "POST" && path === "/v1/events") {
     return json(act(call, "ingest", requireKey(call, "source"), await readJson(request)));
+  }
+  if (method === "POST" && path === "/v1/project-tasks") return submitProjectTask(call);
+  const task = /^\/v1\/project-tasks\/(task_[0-9a-f]{32})$/.exec(path);
+  if (method === "GET" && task) return taskStatus(call, task[1]);
+  const taskAction = /^\/v1\/project-tasks\/(task_[0-9a-f]{32})\/(cancel|recheck)$/.exec(path);
+  if (method === "POST" && taskAction) {
+    return taskMutation(call, taskAction[1], taskAction[2] as "cancel" | "recheck");
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);

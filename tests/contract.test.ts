@@ -67,6 +67,72 @@ test("the prompt says what to do and how to end, but not what anyone wrote", () 
   assert.ok(!text.includes('"events"'), "a rule that can't emit isn't offered it");
 });
 
+test("stage prompt keeps task goal and data in the context file and requests only declarative evidence", () => {
+  const staged = job({
+    stage: {
+      task_id: "task-one",
+      execution_id: "execution-one",
+      generation: 1,
+      stage_id: "execute",
+      input_revision: null,
+      workflow: {
+        entry: "execute",
+        max_transitions: 4,
+        stages: {
+          execute: {
+            route: "writer",
+            mode: "write",
+            max_visits: 2,
+            on: { implemented: "review", blocked: "$human", execution_failed: "$human" },
+            checks: [],
+          },
+        },
+        git: {
+          remote: "/trusted.git",
+          base_ref: "refs/heads/main",
+          task_ref_prefix: "refs/heads/tasks/",
+          artifact_paths: ["plan/result.md"],
+        },
+        human: { options: [] },
+      },
+      route: { name: "writer", agent_id: "a", worker: "mac", cwd: "/project", access: "full" },
+      git: {
+        remote: "/trusted.git",
+        base_ref: "refs/heads/main",
+        task_ref_prefix: "refs/heads/tasks/",
+        artifact_paths: ["plan/result.md"],
+      },
+      checks: [],
+      evidence: [],
+    },
+    context: {
+      task: {
+        task_id: "task-one",
+        source: "app",
+        type: "task.test",
+        subject: "x",
+        goal: "SECRET GOAL",
+        acceptance: ["SECRET ACCEPTANCE"],
+        data: { note: "SECRET DATA" },
+      },
+      events: [],
+      answers: [],
+      timers: [],
+      waiting: [],
+      open: [],
+      decided: [],
+    },
+  }) as any;
+  const text = promptFor(staged, "/private/context.json");
+  assert.match(text, /execution-one/);
+  assert.match(text, /\/private\/context\.json/);
+  assert.match(text, /```agent-autoloop-stage/);
+  assert.match(text, /plan\/result\.md/);
+  assert.match(text, /implemented/);
+  assert.doesNotMatch(text, /SECRET GOAL|SECRET ACCEPTANCE|SECRET DATA/);
+  assert.doesNotMatch(text, /sha256.*:/i);
+});
+
 test("the prompt mentions what this run is carrying on, and what it may emit", () => {
   const text = promptFor(
     job({

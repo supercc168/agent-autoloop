@@ -79,6 +79,18 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
   const hasMore = page.length > PAGE;
   const byId = new Map([...page.slice(0, PAGE), ...active].map((run) => [run.id, run]));
   const visible = [...byId.values()].sort((a, b) => b.id - a.id);
+  const projectTasks = all<Row>(
+    "SELECT task_id,source,source_id,input,state,generation,current_stage,current_execution,current_revision,human_card,created_at,updated_at,completed_at FROM project_tasks ORDER BY updated_at DESC LIMIT 100",
+  ).map(({ input, ...task }) => {
+    const submitted = JSON.parse(input);
+    return {
+      ...task,
+      type: submitted.type,
+      subject: submitted.subject,
+      goal: submitted.goal,
+      acceptance: submitted.acceptance,
+    };
+  });
   return {
     now: iso(now),
     timezone: rules.timezone,
@@ -128,6 +140,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       stopping: run.cancel_at !== null,
       events: all<Row>(EVENTS_OF_RUN, [run.id]),
     })),
+    projectTasks,
     hasMore,
     nextBefore: hasMore ? page[PAGE - 1].id : null,
     unrouted: unrouted(),

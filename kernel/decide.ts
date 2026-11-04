@@ -18,7 +18,22 @@ import {
   workers,
 } from "./query.ts";
 import { cronOf, eventRule, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
-import { addUsage, parseEvent, parseResult, type Later, type Rejected, type Result } from "../protocol/validate.ts";
+import {
+  canonicalProjectTask,
+  parseProjectTaskInput,
+  parseStageResult,
+  type ProjectTaskInput,
+  type StageResult,
+} from "../protocol/project-tasks.ts";
+import {
+  addUsage,
+  parseEvent,
+  parseResult,
+  parseStarted,
+  type Later,
+  type Rejected,
+  type Result,
+} from "../protocol/validate.ts";
 
 export type Input = { type: string; args: any[] };
 
@@ -38,6 +53,23 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
     attempts: 0,
     ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
     ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage"),
+  },
+  project_tasks: {
+    ...nulls("current_stage", "current_execution", "current_revision", "human_card", "completed_at"),
+    requests: "{}",
+    late_outcomes: "[]",
+  },
+  stage_executions: {
+    ...nulls(
+      "input_revision",
+      "input_resolution",
+      "output_revision",
+      "verdict",
+      "progress",
+      "result",
+      "started_at",
+      "finished_at",
+    ),
   },
   cards: {
     ...CARD_BASICS,
@@ -91,7 +123,10 @@ function add(draft: Draft, table: Table, fields: Row) {
 }
 
 const ruleNamed = (draft: Draft, name: string) => draft.rules.rules.find((rule) => rule.name === name);
+const ruleForRun = (draft: Draft, run: Row) =>
+  configuration(draft.view, run.rules_version).rules.find((rule) => rule.name === run.rule);
 function assignQueued(draft: Draft, run: Row) {
+  if (run.task_id) return;
   const config = draft.view.get("config", "rules")!;
   const rule = (config.value as Rules).rules.find((rule) => rule.name === run.rule);
   if (!rule) return;
@@ -145,6 +180,147 @@ function enqueue(draft: Draft, rule: Rule, event: number, subject: string, resum
   if (resume) put(draft, "runs", run.id, { resume });
 }
 
+function routeSnapshot(rules: Rules, workflowName: string) {
+  const workflow = rules.workflows[workflowName];
+  return Object.fromEntries(
+    Object.entries(workflow.stages).map(([stageId, stage]) => {
+      const rule = rules.rules.find((candidate) => candidate.name === stage.route)!;
+      return [stageId, { rule, agent_id: rule.to, agent: rules.agents[rule.to] }];
+    }),
+  );
+}
+
+function workflowIntake(draft: Draft, source: string, type: string) {
+  return draft.rules.rules.filter(
+    (rule) => rule.workflow && eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, type),
+  );
+}
+
+function canEnqueueTaskStage(task: Row, stageId: string, transitions = task.transitions) {
+  const workflow = JSON.parse(task.workflow);
+  const stage = workflow.stages[stageId];
+  const visits = JSON.parse(task.visits);
+  return !!stage && transitions < workflow.max_transitions && (visits[stageId] ?? 0) < stage.max_visits;
+}
+
+function nextTaskInput(draft: Draft, task: Row): [string | null, "task_ref" | null] {
+  const execution = draft.view.get("stage_executions", task.current_execution);
+  return execution && execution.generation === task.generation && execution.input_resolution === "task_ref"
+    ? [execution.input_revision, "task_ref"]
+    : [task.current_revision, null];
+}
+
+function enqueueTaskStage(
+  draft: Draft,
+  task: Row,
+  stageId: string,
+  inputRevision: string | null,
+  inputResolution: "task_ref" | null = null,
+) {
+  const workflow = JSON.parse(task.workflow);
+  const stage = workflow.stages[stageId];
+  if (!stage) throw new Conflict(`任务的 stage 不存在：${stageId}`);
+  const visits = JSON.parse(task.visits) as Record<string, number>;
+  const nextVisit = (visits[stageId] ?? 0) + 1;
+  if (!canEnqueueTaskStage(task, stageId)) return false;
+  const rules = configuration(draft.view, task.rules_version);
+  const rule = rules.rules.find((candidate) => candidate.name === stage.route);
+  if (!rule) throw new Conflict(`任务冻结的 route 不存在：${stage.route}`);
+  const priorSession = rows(draft.view, "runs", { task_id: task.task_id })
+    .filter((candidate) => {
+      const prior = draft.view.get("stage_executions", candidate.execution_id);
+      return (
+        candidate.rules_version === task.rules_version &&
+        candidate.agent === rule.to &&
+        candidate.rule === rule.name &&
+        prior &&
+        workflow.stages[prior.stage_id]?.mode === stage.mode &&
+        typeof candidate.session === "string" &&
+        candidate.session.trim() !== ""
+      );
+    })
+    .at(-1)?.session;
+  const sequence = task.execution_count + 1;
+  const executionId = `${task.task_id}:g${task.generation}:e${sequence}`;
+  const run = add(draft, "runs", {
+    rule: rule.name,
+    agent: rule.to,
+    grp: rule.group,
+    lane: task.task_id,
+    state: "queued",
+    not_before: draft.at,
+    created_at: draft.at,
+    rules_version: task.rules_version,
+    task_id: task.task_id,
+    execution_id: executionId,
+    ...(priorSession ? { resume: priorSession } : {}),
+  });
+  put(draft, "stage_executions", executionId, {
+    execution_id: executionId,
+    task_id: task.task_id,
+    generation: task.generation,
+    sequence,
+    stage_id: stageId,
+    run_id: run.id,
+    request_id: executionId,
+    state: "queued",
+    input_revision: inputRevision,
+    input_resolution: inputResolution,
+    created_at: draft.at,
+  });
+  put(draft, "project_tasks", task.task_id, {
+    state: "queued",
+    current_stage: stageId,
+    current_execution: executionId,
+    execution_count: sequence,
+    visits: JSON.stringify({ ...visits, [stageId]: nextVisit }),
+    updated_at: draft.at,
+  });
+  return true;
+}
+
+function submitProjectTask(draft: Draft, source: string, given: unknown, selectedRule?: Rule) {
+  if (!draft.rules.sources[source]) throw new InputError(`没有这个来源：${source}`);
+  const input = parseProjectTaskInput(given);
+  const hash = digest(canonicalProjectTask(input));
+  const taskId = `task_${digest(`project-task\0${source}\0${input.id}`).slice(0, 32)}`;
+  const existing = draft.view.get("project_tasks", taskId);
+  if (existing) {
+    if (existing.source !== source || existing.source_id !== input.id || existing.input_hash !== hash) {
+      throw new Conflict("同一来源的任务编号已经提交过不一样的内容");
+    }
+    return { task_id: taskId, duplicate: true };
+  }
+  const candidates = selectedRule ? [selectedRule] : workflowIntake(draft, source, input.type);
+  if (candidates.length !== 1 || !candidates[0].workflow) {
+    throw new InputError(candidates.length ? "项目任务匹配了不止一个可信工作流" : "没有匹配这个来源和类型的可信工作流");
+  }
+  const intake = candidates[0];
+  const workflowName = intake.workflow!;
+  const workflow = draft.rules.workflows[workflowName];
+  const rulesVersion = draft.view.get("config", "rules")!.version;
+  const task = put(draft, "project_tasks", taskId, {
+    task_id: taskId,
+    source,
+    source_id: input.id,
+    input_hash: hash,
+    input: JSON.stringify(input),
+    workflow_name: workflowName,
+    workflow: JSON.stringify(workflow),
+    routes: JSON.stringify(routeSnapshot(draft.rules, workflowName)),
+    rules_version: rulesVersion,
+    state: "queued",
+    generation: 1,
+    transitions: 0,
+    visits: "{}",
+    execution_count: 0,
+    created_at: draft.at,
+    updated_at: draft.at,
+  });
+  if (!enqueueTaskStage(draft, task, workflow.entry, null)) throw new Conflict("工作流入口已经超过访问上限");
+  return { task_id: taskId, duplicate: false };
+}
+
 /** Keeps an event under a key of its own: one the hub makes up mustn't collide with one a source sent. */
 function recordEvent(draft: Draft, source: string, event: Row, routed: string[]): number {
   let key = event.id;
@@ -171,7 +347,7 @@ function ingest(draft: Draft, source: string, given: unknown) {
   if (existing) return { event: existing.id, duplicate: true, routed: JSON.parse(existing.routed) };
   const tooDeep = event.hops > MAX_HOPS;
   const takes = (rule: Rule) =>
-    eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type);
+    !rule.workflow && eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type);
   const matched = tooDeep ? [] : draft.rules.rules.filter(takes);
   const routed = matched.map((rule) => rule.name);
   const id = recordEvent(draft, source, event, routed);
@@ -188,6 +364,18 @@ function heldRun(draft: Draft, id: number, token: string, states: string[]) {
   const issued = run && states.includes(run.state) && run.issued !== null;
   if (!issued || credential(draft.env, "run", id, run.issued) !== token) throw new AuthError("这件活不归这个令牌");
   return run;
+}
+
+function checkTaskSession(run: Row, session: string | undefined) {
+  if (
+    run.task_id &&
+    run.session !== null &&
+    run.session !== undefined &&
+    session !== undefined &&
+    session !== run.session
+  ) {
+    throw new Conflict("任务执行的 native session 已经固定");
+  }
 }
 
 function cardFromReceipt(draft: Draft, run: Row, kind: string, card: Row) {
@@ -211,6 +399,10 @@ function sweep(draft: Draft) {
         run.state === "claimed" && workerOf(draft.view, run) === worker && Date.parse(run.seen_at) < now - RUN_LEASE;
       for (const run of rows(draft.view, "runs", { state: "claimed" }).filter(inDoubt)) {
         put(draft, "runs", run.id, { state: "unknown" });
+        if (run.task_id) {
+          put(draft, "stage_executions", run.execution_id, { state: "unknown" });
+          put(draft, "project_tasks", run.task_id, { state: "unknown", updated_at: draft.at });
+        }
         const agent = configuration(draft.view, run.rules_version).agents[run.agent].name;
         const words = `交给 ${agent} 后超过 5 分钟没有回音，不确定做没做完；后续新任务照常处理。`;
         notify(draft, `run:${run.id}:unknown`, run.rule, words, threadOf(run));
@@ -235,23 +427,25 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
   const claimed = runs.filter((run) => run.state === "claimed");
-  const groupLimit = (group: string) => draft.rules.rules.find((rule) => rule.group === group)?.parallel ?? 1;
+  const groupLimit = (run: Row) => ruleForRun(draft, run)?.parallel ?? 1;
   const claimable = (run: Row) =>
     run.state === "queued" &&
-    agents.includes(ruleNamed(draft, run.rule)?.to ?? "") &&
+    (run.task_id ? workerOf(draft.view, run) === worker : agents.includes(ruleNamed(draft, run.rule)?.to ?? "")) &&
     Date.parse(run.not_before) <= draft.now &&
-    ruleNamed(draft, run.rule) &&
+    (run.task_id ? ruleForRun(draft, run) : ruleNamed(draft, run.rule)) &&
     !claimed.some((other) => other.grp === run.grp && other.lane === run.lane) &&
-    claimed.filter((other) => other.grp === run.grp).length < groupLimit(run.grp);
+    claimed.filter((other) => other.grp === run.grp).length < groupLimit(run);
   // The same claim again means the answer got lost: it gets back the run it already has.
   const held = claimed.find((run) => run.claim === claim && workerOf(draft.view, run) === worker);
   const run = held ?? runs.find(claimable);
   if (!run) return null;
   if (!held) assignQueued(draft, run);
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
-  const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
+  const rules_version = held || run.task_id ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
+  if (run.execution_id) put(draft, "stage_executions", run.execution_id, { state: "claimed" });
+  if (run.task_id) put(draft, "project_tasks", run.task_id, { state: "running", updated_at: draft.at });
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
 }
 
@@ -339,6 +533,254 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   return rejected;
 }
 
+function taskDecisionCard(draft: Draft, task: Row, execution: Row, reason: string, detail = "") {
+  const workflow = JSON.parse(task.workflow);
+  const input = JSON.parse(task.input) as ProjectTaskInput;
+  const options = workflow.human.options.map((option: { label: string }) => option.label);
+  const explanation =
+    reason === "late_outcome"
+      ? "取消或不确定期间收到了真实终态，已保留结果但没有继续推进。"
+      : reason === "operator_attested"
+        ? "这次执行由 operator_attested 人工核实停止，未自动重试。"
+        : reason === "budget_exhausted"
+          ? "工作流的累计访问或转换上限已经用完，不会自动扩大上限。"
+          : "当前阶段已结束，需要本人选择下一步。";
+  const card = createCard(draft, {
+    key: `task:${task.task_id}:decision:${task.generation}:${execution.execution_id}:${reason}`,
+    kind: "ask",
+    title: `项目任务 ${input.id} 需要决定`,
+    text: [explanation, detail].filter(Boolean).join("\n"),
+    options,
+    about: `任务 ${task.task_id}，阶段 ${execution.stage_id}，当前版本 ${task.current_revision ?? "尚未确定"}`,
+    task_id: task.task_id,
+    task_generation: task.generation,
+    task_execution: execution.execution_id,
+    task_revision: task.current_revision,
+    task_reason: reason,
+    task_actions: JSON.stringify(workflow.human.options),
+    source: task.source,
+    created_at: draft.at,
+  });
+  put(draft, "project_tasks", task.task_id, { state: "waiting_human", human_card: card.card, updated_at: draft.at });
+  return card.card;
+}
+
+function validCompletion(configured: any, stage: StageResult, revision: string | null) {
+  if (stage.verdict !== "verified" || !revision) return false;
+  if (stage.findings.some((finding) => finding.severity === "blocking")) return false;
+  if (stage.input_revision !== revision || stage.output_revision !== revision) return false;
+  if (stage.artifacts.some((artifact) => artifact.revision !== revision)) return false;
+  return configured.checks.every((required: { name: string }) =>
+    stage.checks.some((check) => check.name === required.name && check.exit_code === 0 && check.revision === revision),
+  );
+}
+
+function taskResult(draft: Draft, run: Row, given: unknown) {
+  if (!given || typeof given !== "object" || Array.isArray(given)) throw new InputError("结果要是一个 JSON 对象");
+  const raw = { ...(given as Record<string, unknown>) };
+  const stage = parseStageResult(raw.stage);
+  delete raw.stage;
+  const result = parseResult(raw);
+  if (result.outcome !== "done" && result.outcome !== "nothing") {
+    throw new InputError("任务阶段要以 done 或 nothing 结束，并提交 stage verdict");
+  }
+  if ([result.ask, result.notice, result.resolve, result.later, result.events].some((items) => items?.length)) {
+    throw new InputError("任务阶段不能提交 ask、notice、resolve、later 或 events；工作流负责推进");
+  }
+  const task = draft.view.get("project_tasks", run.task_id);
+  const execution = draft.view.get("stage_executions", run.execution_id);
+  if (!task || !execution || task.current_execution !== execution.execution_id || execution.run_id !== run.id) {
+    throw new Conflict("这不是任务当前的阶段执行");
+  }
+  checkTaskSession(run, result.session);
+  if (result.session && !run.session) put(draft, "runs", run.id, { session: result.session });
+  if (stage.execution_id !== execution.execution_id || stage.request_id !== execution.request_id) {
+    throw new Conflict("stage 的 execution_id 或 request_id 不属于这次执行");
+  }
+  const workflow = JSON.parse(task.workflow);
+  const configured = workflow.stages[execution.stage_id];
+  if (!configured || !Object.hasOwn(configured.on, stage.verdict)) {
+    throw new InputError(`stage ${execution.stage_id} 不接受 verdict ${stage.verdict}`);
+  }
+  if (
+    (stage.verdict === "approved" || stage.verdict === "verified") &&
+    stage.findings.some((finding) => finding.severity === "blocking")
+  ) {
+    throw new InputError(`${stage.verdict} 不能同时包含 blocking finding`);
+  }
+  const unpinned = execution.input_resolution === "task_ref" && execution.input_revision === null;
+  const preAdmissionFailure =
+    unpinned &&
+    stage.verdict === "execution_failed" &&
+    stage.input_revision === undefined &&
+    stage.output_revision === undefined &&
+    stage.remote_ref === undefined &&
+    stage.remote_run_id === undefined &&
+    stage.resolution === undefined &&
+    stage.artifacts.length === 0 &&
+    stage.checks.length === 0 &&
+    !execution.started_at &&
+    !run.session &&
+    run.state !== "unknown";
+  if (unpinned && !preAdmissionFailure) throw new Conflict("复查要先用 started 固定 input_revision，才能提交阶段结果");
+  const acceptedInput = unpinned ? null : (execution.input_revision ?? stage.input_revision ?? task.current_revision);
+  if (execution.input_revision && stage.input_revision !== execution.input_revision) {
+    throw new Conflict("stage 的 input_revision 和已接受版本不一致");
+  }
+  if (!preAdmissionFailure && task.current_revision && acceptedInput !== task.current_revision) {
+    throw new Conflict("stage 的 input_revision 不是任务当前版本");
+  }
+  if (configured.mode === "inspect" && stage.output_revision && stage.output_revision !== acceptedInput) {
+    throw new Conflict("inspect stage 不能改变版本");
+  }
+  const outputRevision = stage.output_revision ?? acceptedInput ?? null;
+  if (run.cancel_at && stage.resolution) {
+    const resolved = {
+      ...stage,
+      input_revision: acceptedInput ?? undefined,
+      output_revision: outputRevision ?? undefined,
+    };
+    put(draft, "stage_executions", execution.execution_id, {
+      state: "resolved",
+      input_revision: acceptedInput,
+      output_revision: outputRevision,
+      verdict: stage.verdict,
+      result: JSON.stringify(resolved),
+      finished_at: draft.at,
+    });
+    put(draft, "runs", run.id, {
+      state: "cancelled",
+      finished_at: draft.at,
+      summary: result.summary ?? "",
+      error: null,
+      cancel_at: null,
+    });
+    put(draft, "project_tasks", task.task_id, {
+      state: "cancelled",
+      completed_at: draft.at,
+      updated_at: draft.at,
+      resolution: JSON.stringify(stage.resolution),
+    });
+    notify(
+      draft,
+      `task:${task.task_id}:operator-attested-cancel`,
+      "项目任务已按人工核实取消",
+      `operator_attested: ${stage.resolution.reason}`,
+      { once: true, source: task.source },
+    );
+    return { result, stage: resolved };
+  }
+  if (run.cancel_at) {
+    const late = { result, stage, received_at: draft.at };
+    const outcomes = JSON.parse(task.late_outcomes ?? "[]");
+    put(draft, "stage_executions", execution.execution_id, {
+      state: "late",
+      input_revision: acceptedInput,
+      output_revision: outputRevision,
+      verdict: stage.verdict,
+      result: JSON.stringify(stage),
+      finished_at: draft.at,
+    });
+    put(draft, "runs", run.id, {
+      state: result.outcome,
+      finished_at: draft.at,
+      summary: result.summary ?? "",
+      error: null,
+      cancel_at: null,
+    });
+    put(draft, "project_tasks", task.task_id, {
+      late_outcomes: JSON.stringify([...outcomes, late]),
+      updated_at: draft.at,
+    });
+    taskDecisionCard(draft, draft.view.get("project_tasks", task.task_id)!, execution, "late_outcome");
+    return { result, stage };
+  }
+  const transitions = task.transitions + 1;
+  const target = configured.on[stage.verdict];
+  if (!preAdmissionFailure && target === "$complete" && !validCompletion(configured, stage, outputRevision)) {
+    throw new InputError("只有 verified、精确当前版本和全部通过的配置检查才能完成任务");
+  }
+  const finished = {
+    ...stage,
+    input_revision: acceptedInput ?? undefined,
+    output_revision: outputRevision ?? undefined,
+  };
+  // The adapter attests the immutable output locator. The same fact adopts that output and ends task-ref resolution.
+  const acceptedWrite = configured.mode === "write" && stage.output_revision && stage.remote_ref && !stage.resolution;
+  put(draft, "stage_executions", execution.execution_id, {
+    state: "finished",
+    input_revision: acceptedInput,
+    input_resolution: acceptedWrite ? null : execution.input_resolution,
+    output_revision: outputRevision,
+    verdict: stage.verdict,
+    result: JSON.stringify(finished),
+    finished_at: draft.at,
+  });
+  put(draft, "runs", run.id, {
+    state: result.outcome,
+    finished_at: draft.at,
+    summary: result.summary ?? "",
+    error: null,
+    cancel_at: null,
+  });
+  put(draft, "project_tasks", task.task_id, {
+    transitions,
+    current_revision: preAdmissionFailure ? task.current_revision : outputRevision,
+    updated_at: draft.at,
+  });
+  const current = draft.view.get("project_tasks", task.task_id)!;
+  if (preAdmissionFailure) {
+    taskDecisionCard(draft, current, execution, "execution_failed");
+  } else if (transitions > workflow.max_transitions) {
+    taskDecisionCard(draft, current, execution, "budget_exhausted");
+  } else if (target === "$complete") {
+    put(draft, "project_tasks", task.task_id, { state: "completed", completed_at: draft.at });
+  } else if (target === "$failed") {
+    put(draft, "project_tasks", task.task_id, { state: "failed", completed_at: draft.at });
+  } else if (target === "$human") {
+    taskDecisionCard(
+      draft,
+      current,
+      execution,
+      stage.resolution ? "operator_attested" : stage.verdict,
+      stage.resolution ? `${stage.resolution.kind}: ${stage.resolution.reason}` : "",
+    );
+  } else if (!enqueueTaskStage(draft, current, target, ...nextTaskInput(draft, current))) {
+    taskDecisionCard(draft, current, execution, "budget_exhausted");
+  }
+  return { result, stage: finished };
+}
+
+function cancelledTaskResult(draft: Draft, run: Row, given: unknown) {
+  const result = parseResult(given);
+  checkTaskSession(run, result.session);
+  if (result.outcome !== "cancelled") throw new InputError("不是取消结果");
+  if (result.stage) throw new InputError("已确认取消不能带 stage；真实终态要用 done 提交为迟到结果");
+  if ([result.ask, result.notice, result.resolve, result.later, result.events].some((items) => items?.length)) {
+    throw new InputError("取消结果不能带通用回执动作");
+  }
+  const task = draft.view.get("project_tasks", run.task_id);
+  const execution = draft.view.get("stage_executions", run.execution_id);
+  if (!task || !execution) throw new Conflict("没有这次任务执行");
+  put(draft, "stage_executions", execution.execution_id, {
+    state: "cancelled",
+    finished_at: draft.at,
+  });
+  put(draft, "runs", run.id, {
+    state: "cancelled",
+    finished_at: draft.at,
+    summary: result.summary ?? "",
+    error: null,
+    cancel_at: null,
+  });
+  put(draft, "project_tasks", task.task_id, {
+    state: "cancelled",
+    completed_at: draft.at,
+    updated_at: draft.at,
+  });
+  return { result };
+}
+
 function finish(draft: Draft, id: number, token: string, given: unknown) {
   const hash = digest(JSON.stringify(given ?? null));
   const prior = draft.view.get("runs", id);
@@ -348,14 +790,22 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     return { rejected: JSON.parse(prior.last_answer ?? "[]"), duplicate: true };
   }
   const run = heldRun(draft, id, token, ["claimed", "unknown"]);
-  const result = parseResult(given);
+  const parsedTask = run.task_id
+    ? (given as Record<string, unknown> | null)?.outcome === "cancelled"
+      ? cancelledTaskResult(draft, run, given)
+      : taskResult(draft, run, given)
+    : undefined;
+  const result = parsedTask?.result ?? parseResult(given);
+  if (!run.task_id && result.stage) throw new InputError("普通结果不能带 stage");
   const session = result.session ?? run.session;
   const usage = result.usage
     ? JSON.stringify(addUsage(run.usage ? JSON.parse(run.usage) : undefined, result.usage))
     : run.usage;
   put(draft, "runs", id, { last_issued: run.issued, last_result: hash, issued: null, session, usage });
   let rejected: Rejected[] = [];
-  if (result.outcome === "failed") rejected = retryLater(draft, run, result);
+  if (parsedTask) {
+    // taskResult atomically recorded the receipt and next workflow state above.
+  } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
   else if (result.outcome === "cancelled") {
     put(draft, "runs", id, {
       state: "cancelled",
@@ -368,6 +818,179 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   return { rejected };
 }
 
+function answerTaskCard(draft: Draft, card: Row, given: Row) {
+  const task = draft.view.get("project_tasks", card.task_id);
+  const current =
+    task &&
+    task.state === "waiting_human" &&
+    task.human_card === card.id &&
+    task.generation === card.task_generation &&
+    task.current_execution === card.task_execution &&
+    task.current_revision === card.task_revision;
+  if (!current) return { changed: false, state: card.state };
+  if (given.choice === undefined) {
+    if (typeof given.text !== "string" || !given.text.trim()) throw new InputError("回答要是非空文字或一个选项");
+    if (card.answer !== null) return { changed: false, state: "open" };
+    put(draft, "cards", card.id, {
+      answer: given.text.trim(),
+      by: given.by ?? null,
+      answer_by: given.by ?? null,
+      answered_at: draft.at,
+      version: card.version + 1,
+    });
+    return { changed: true, state: "open" };
+  }
+  const actions = JSON.parse(card.task_actions);
+  if (!Number.isInteger(given.choice) || given.choice < 0 || given.choice >= actions.length) {
+    throw new InputError("没有这个选项");
+  }
+  const action = actions[given.choice];
+  const target = action.action === "resume" ? action.stage : task.current_stage;
+  if (action.action === "resume" || action.action === "retry") {
+    if (!canEnqueueTaskStage(task, target, task.transitions + 1)) {
+      throw new Conflict("工作流累计上限已经用完，人工选择不能扩大上限");
+    }
+  }
+  const decision = {
+    state: "decided",
+    choice: given.choice,
+    by: given.by ?? null,
+    decided_at: draft.at,
+    version: card.version + 1,
+  };
+  put(draft, "cards", card.id, decision);
+  if (action.action === "fail") {
+    put(draft, "project_tasks", task.task_id, {
+      state: "failed",
+      human_card: null,
+      completed_at: draft.at,
+      updated_at: draft.at,
+    });
+  } else if (action.action === "cancel") {
+    put(draft, "project_tasks", task.task_id, {
+      state: "cancelled",
+      human_card: null,
+      completed_at: draft.at,
+      updated_at: draft.at,
+    });
+  } else {
+    put(draft, "project_tasks", task.task_id, {
+      transitions: task.transitions + 1,
+      human_card: null,
+      updated_at: draft.at,
+    });
+    const current = draft.view.get("project_tasks", task.task_id)!;
+    enqueueTaskStage(draft, current, target, ...nextTaskInput(draft, current));
+  }
+  return { changed: true, state: "decided" };
+}
+
+function taskMutation(task: Row, kind: string, given: unknown) {
+  if (!given || typeof given !== "object" || Array.isArray(given)) throw new InputError("请求要是 JSON 对象");
+  const fields = Object.keys(given);
+  if (fields.length !== 1 || fields[0] !== "request_id") throw new InputError("请求只能有 request_id");
+  const requestId = (given as Row).request_id;
+  if (typeof requestId !== "string" || !requestId.trim() || [...requestId].length > 200) {
+    throw new InputError("request_id 必填，最多 200 个字");
+  }
+  const hash = digest(JSON.stringify({ kind, request_id: requestId }));
+  const requests = JSON.parse(task.requests ?? "{}") as Record<string, { hash: string; answer: Row }>;
+  const previous = requests[requestId];
+  if (previous && previous.hash !== hash) throw new Conflict("同一个 request_id 已经用于另一个请求");
+  return { requestId, hash, requests, previous };
+}
+
+function rememberTaskMutation(
+  draft: Draft,
+  taskId: string,
+  requestId: string,
+  hash: string,
+  requests: Record<string, { hash: string; answer: Row }>,
+  answer: Row,
+) {
+  put(draft, "project_tasks", taskId, {
+    requests: JSON.stringify({ ...requests, [requestId]: { hash, answer } }),
+    updated_at: draft.at,
+  });
+}
+
+function cancelTask(draft: Draft, task: Row) {
+  const taskId = task.task_id;
+  if (["completed", "failed", "cancelled"].includes(task.state)) throw new InputError("这个项目任务已经结束");
+  const run = task.current_execution
+    ? rows(draft.view, "runs", { execution_id: task.current_execution })[0]
+    : undefined;
+  const execution = task.current_execution ? draft.view.get("stage_executions", task.current_execution) : undefined;
+  let state: string;
+  if (task.state === "queued" || task.state === "waiting_human") {
+    state = "cancelled";
+    if (run?.state === "queued") put(draft, "runs", run.id, { state, finished_at: draft.at });
+    if (execution && !["finished", "late", "resolved"].includes(execution.state)) {
+      put(draft, "stage_executions", execution.execution_id, { state, finished_at: draft.at });
+    }
+    if (task.human_card) {
+      const card = draft.view.get("cards", task.human_card);
+      if (card?.state === "open") closeCard(draft, card, "任务已取消", "本人");
+    }
+    put(draft, "project_tasks", taskId, {
+      state,
+      human_card: null,
+      completed_at: draft.at,
+      updated_at: draft.at,
+    });
+  } else {
+    state = "cancel_requested";
+    if (!run || !["claimed", "unknown"].includes(run.state)) throw new Conflict("任务没有可确认停止的活动执行");
+    put(draft, "runs", run.id, { cancel_at: run.cancel_at ?? draft.at });
+    const observedState = run.state === "unknown" ? "unknown" : state;
+    if (execution) put(draft, "stage_executions", execution.execution_id, { state: observedState });
+    put(draft, "project_tasks", taskId, { state: observedState, updated_at: draft.at });
+  }
+  return { task_id: taskId, state };
+}
+
+function cancelProjectTask(draft: Draft, taskId: string, given: unknown) {
+  const task = draft.view.get("project_tasks", taskId);
+  if (!task) throw new NotFound("没有这个项目任务");
+  const request = taskMutation(task, "cancel", given);
+  if (request.previous) return { ...request.previous.answer, duplicate: true };
+  const answer = cancelTask(draft, task);
+  rememberTaskMutation(draft, taskId, request.requestId, request.hash, request.requests, answer);
+  return { ...answer, duplicate: false };
+}
+
+function recheckProjectTask(draft: Draft, taskId: string, given: unknown) {
+  const task = draft.view.get("project_tasks", taskId);
+  if (!task) throw new NotFound("没有这个项目任务");
+  const request = taskMutation(task, "recheck", given);
+  if (request.previous) return { ...request.previous.answer, duplicate: true };
+  if (task.state !== "completed") throw new Conflict("只有已完成且没有活动执行的任务能复查");
+  const workflow = JSON.parse(task.workflow);
+  if (!workflow.recheck) throw new InputError("这个工作流没有配置 recheck");
+  if (!task.current_revision) throw new Conflict("任务还没有可复查的当前版本");
+  const execution = draft.view.get("stage_executions", task.current_execution)!;
+  const transitions = task.transitions + 1;
+  if (!canEnqueueTaskStage(task, workflow.recheck, transitions)) {
+    taskDecisionCard(draft, task, execution, "budget_exhausted");
+    const answer = { task_id: taskId, generation: task.generation, state: "waiting_human" };
+    rememberTaskMutation(draft, taskId, request.requestId, request.hash, request.requests, answer);
+    return { ...answer, duplicate: false };
+  }
+  const generation = task.generation + 1;
+  put(draft, "project_tasks", taskId, {
+    state: "queued",
+    generation,
+    transitions,
+    human_card: null,
+    completed_at: null,
+    updated_at: draft.at,
+  });
+  enqueueTaskStage(draft, draft.view.get("project_tasks", taskId)!, workflow.recheck, null, "task_ref");
+  const answer = { task_id: taskId, generation, state: "queued" };
+  rememberTaskMutation(draft, taskId, request.requestId, request.hash, request.requests, answer);
+  return { ...answer, duplicate: false };
+}
+
 function answer(draft: Draft, id: number, given: Row) {
   const card = draft.view.get("cards", id);
   if (!card) throw new NotFound("没有这张卡片");
@@ -378,6 +1001,7 @@ function answer(draft: Draft, id: number, given: Row) {
     if (!delivery?.ref || delivery.ref !== given.ref) throw new AuthError("不是发出去的那条消息");
   }
   if (card.state !== "open") return { changed: false, state: card.state };
+  if (card.task_id) return answerTaskCard(draft, card, given);
   if (card.kind === "notice") {
     closeCard(draft, card, "已处理", given.by ?? null);
     return { changed: true, state: "closed" };
@@ -435,7 +1059,25 @@ function tick(draft: Draft) {
     if (now < Date.parse(schedule.next_at)) continue;
     const key = `${rule.name}@${iso(latestBefore(cron, Date.parse(schedule.next_at), now, timezone))}`;
     if (!rows(draft.view, "events", { source: SCHEDULE, key }).length) {
-      enqueue(draft, rule, recordEvent(draft, SCHEDULE, { id: key, type: "schedule.tick" }, [rule.name]), "");
+      const eventId = recordEvent(draft, SCHEDULE, { id: key, type: "schedule.tick" }, [rule.name]);
+      if (rule.workflow) {
+        const accepted = submitProjectTask(
+          draft,
+          SCHEDULE,
+          {
+            id: key,
+            type: "schedule.tick",
+            subject: rule.workflow,
+            goal: rule.prompt ?? `执行可信定时规则 ${rule.name}`,
+            acceptance: ["按可信工作流完成，并通过配置的检查"],
+            data: { rule: rule.name, occurred_at: key.slice(rule.name.length + 1) },
+          },
+          rule,
+        );
+        const task = draft.view.get("project_tasks", accepted.task_id)!;
+        const execution = draft.view.get("stage_executions", task.current_execution)!;
+        put(draft, "run_events", `${execution.run_id}:${eventId}`, { run_id: execution.run_id, event_id: eventId });
+      } else enqueue(draft, rule, eventId, "");
     }
     put(draft, "schedules", rule.name, { next_at: nextAt() });
   }
@@ -463,6 +1105,9 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     void put(draft, "keys", `${kind}:${name}`, { kind, name, hash, created_at: draft.at }),
   removeKey: (draft, kind, name) => void set(draft, "keys", `${kind}:${name}`, null),
   ingest,
+  submitProjectTask,
+  cancelProjectTask,
+  recheckProjectTask,
   createCard,
   tell(draft, key, title, text) {
     const told = createCard(draft, { key, title, text, kind: "notice", fyi: true, once: true });
@@ -484,6 +1129,8 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       const run = draft.view.get("runs", id);
       if (run?.state === "claimed" && workerOf(draft.view, run) === worker) {
         put(draft, "runs", id, { seen_at: draft.at });
+      } else if (run?.task_id && run.state === "unknown" && workerOf(draft.view, run) === worker) {
+        put(draft, "runs", id, { seen_at: draft.at });
       }
     }
   },
@@ -491,19 +1138,56 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     void put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at }),
   claimNext,
   started(draft, id, token, given) {
-    const { session, link } = given ?? {};
-    for (const [field, value] of Object.entries({ session, link })) {
-      if (value !== undefined && (typeof value !== "string" || value.length > 500)) {
-        throw new InputError(`${field} 要是 500 字以内的文字`);
+    const { session, link, stage } = parseStarted(given);
+    const run = heldRun(draft, id, token, ["claimed", "unknown"]);
+    if (!run.task_id && run.state === "unknown") throw new AuthError("这件活不归这个令牌");
+    checkTaskSession(run, session);
+    if (!run.task_id && stage) throw new InputError("普通运行的 started 不能带 stage");
+    if (run.task_id && stage) {
+      const execution = draft.view.get("stage_executions", run.execution_id);
+      const task = draft.view.get("project_tasks", run.task_id);
+      if (!execution || stage.execution_id !== execution.execution_id || stage.request_id !== execution.request_id) {
+        throw new Conflict("started.stage 不属于这次任务执行");
       }
+      if (execution.input_revision && stage.input_revision !== execution.input_revision) {
+        throw new Conflict("started.stage 的 input_revision 已经固定");
+      }
+      const previous = execution.progress ? JSON.parse(execution.progress) : undefined;
+      for (const field of ["remote_run_id", "binding"] as const) {
+        if (previous?.[field] !== undefined && JSON.stringify(previous[field]) !== JSON.stringify(stage[field])) {
+          throw new Conflict(`started.stage 的 ${field} 已经固定`);
+        }
+      }
+      const cancelling = run.cancel_at !== null;
+      const unknown = stage.remote_state === "unknown" || (run.state === "unknown" && !stage.remote_state);
+      const state = unknown ? "unknown" : cancelling ? "cancel_requested" : "running";
+      put(draft, "stage_executions", execution.execution_id, {
+        state,
+        input_revision: execution.input_revision ?? stage.input_revision ?? null,
+        progress: JSON.stringify({ ...previous, ...stage }),
+        started_at: execution.started_at ?? draft.at,
+      });
+      put(draft, "project_tasks", run.task_id, {
+        state,
+        ...(execution.input_resolution === "task_ref" && execution.input_revision === null && stage.input_revision
+          ? { current_revision: stage.input_revision }
+          : {}),
+        updated_at: draft.at,
+      });
+      put(draft, "runs", id, { state: unknown ? "unknown" : "claimed" });
     }
-    const run = heldRun(draft, id, token, ["claimed"]);
     put(draft, "runs", id, { session: session ?? run.session, link: link ?? run.link, seen_at: draft.at });
   },
   finish,
   cancel(draft, id) {
     const run = draft.view.get("runs", id);
     if (!run) throw new NotFound("没有这一轮");
+    if (run.task_id) {
+      const task = draft.view.get("project_tasks", run.task_id);
+      if (!task || task.current_execution !== run.execution_id) throw new InputError("这一轮已经结束了");
+      cancelTask(draft, task);
+      return;
+    }
     if (run.state === "queued") put(draft, "runs", id, { state: "cancelled", finished_at: draft.at });
     else if (run.state === "claimed") put(draft, "runs", id, { cancel_at: draft.at });
     else throw new InputError("这一轮已经结束了");

@@ -87,6 +87,25 @@ Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-
 
 **有按钮的新通道**：在 `~/.agent-autoloop/plugins/<名字>/channel.ts` 写一个，照 `plugins/feishu/channel.ts`：循环领卡片、发或改、报告；收到点击转给 `hub.answer`。协议在 `docs/protocol.md`，用别的语言写也行，只要会发 HTTP。
 
+## 有界项目工作流
+
+需要跨机器完成规划、实现、独立审核、返工和验收时，从 [`examples/recipes/project-workflow/`](../../examples/recipes/project-workflow/README.md) 复制，不要另建一套调度器。`project-workflow` recipe 已把 stage、worker、Lodestar project/identity、full 权限、Git remote/ref、检查、产物和累计上限固定在可信规则里；任务正文只能给目标、验收条件和资料。
+
+登记和管理任务：
+
+```bash
+agent-autoloop task submit --file task.json --json
+agent-autoloop task status '<task_id>' --json
+agent-autoloop task cancel '<task_id>' --request-id '<stable-cancel-id>' --json
+agent-autoloop task recheck '<task_id>' --request-id '<stable-recheck-id>' --json
+```
+
+来源配置存在时，submit 使用来源密钥；owner 代来源提交写 `--source <已配置来源>`。`request_id` 重试必须复用，同一个编号不能兼作 cancel/recheck。MCP 对应 `task_submit`、`task_status`、`task_cancel`、`task_recheck`。
+
+Lodestar 项目适配器目前只支持显式 `access: full`。`inspect` 不是只读沙箱，只由包装器核对版本/工作树未变；真正隔离用独立系统账号、容器和 Git 权限。`unknown` 保留原 execution，不换机器 fresh retry。只有本机操作者在 API 外核实原生工作停止后，才可使用单独的 `agent-operator-client.json` 执行 `lodestar-agent --project … requests reconcile … --stopped`；`operator_attested` 仍要 Hub owner 再选 retry/resume/fail/cancel，不能自动重放。
+
+云 Hub 不运行模型。三台执行电脑主动连接 Hub；Lodestar 卡片通道放在能访问本机 notify/client file 的 Mac。recipe 的 DNS、TLS、Git、身份、飞书和服务步骤都是部署清单，自动测试只证明隔离行为。
+
 ## 交付流水线
 
 需要这台接单电脑已有 `gh` 登录和审查程序。`delivery` 进程只执行本机插件和 main 指定的审查命令，PR 不检出、不在本机跑代码。先把项目的 `ops/delivery.json` 和审查要点放到 main：
@@ -144,10 +163,10 @@ MCP 客户端的启动程序填 `node`，参数为本机引擎绝对路径 `bin/
 
 手机要批卡片、别人的 Webhook 要进来时，把中台放到一台有公网的机器上：
 
-1. 服务器上 `sh install.sh --no-service`，`config.json` 里 `hub.listen` 用 `127.0.0.1:3350`，`hub.publicUrl` 写公网地址，去掉 `worker`，再 `agent-autoloop service install`。前面放一个做 HTTPS 的反向代理（Caddy、nginx）。
+1. 服务器上 `sh install.sh --hub-only --no-service`，不探测本机模型。`config.json` 里 `hub.listen` 用 `127.0.0.1:3350`，`hub.publicUrl` 写公网地址；保留初始化 owner，只在 Hub 配置规则并运行 `agent-autoloop check`，再安排 `agent-autoloop service install`。前面放一个做 HTTPS 的反向代理（Caddy、nginx）。
 2. 每台干活的电脑：服务器上 `agent-autoloop key new worker <名字>`，电脑上 `agent-autoloop join https://中台地址 --worker <名字> --key <密钥>`。`rules.json` 的 Agent 写上对应的 `worker`。
 
-电脑不用开放任何端口，它们自己连过去。
+电脑不用开放任何端口，它们自己连过去。Mac 只接活时不需要本地 rules，也不运行 Hub 的 `check`；用配置解析、Hub `/healthz`、带 worker 密钥的心跳/领活和 Hub owner 状态验证。四机项目工作流的完整私有配置与验证顺序见上述 project-workflow recipe。
 
 ## 日志与恢复
 

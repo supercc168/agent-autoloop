@@ -66,6 +66,14 @@ Claude 要委托 Codex 处理网页时，可用[浏览器交接模板](examples/
 
 没有安装系统服务时，`doctor` 会显示服务未运行；检查中台、Agent 和桌面通道是否在线即可，不要为了消除这条提示安装真实服务。
 
+## 纯 Hub 与多台执行电脑
+
+需要云端只管任务、由多台本机 Lodestar 分阶段执行时，使用 [`examples/recipes/project-workflow/`](examples/recipes/project-workflow/README.md)。这份 `project-workflow` recipe 提供 cloud/mac-a/mac-b/mac-c 配置、可信 workflow、普通任务 JSON 和恢复命令。
+
+纯 Hub 配置只有监听、本人/来源客户端身份，**Hub 不运行 worker 或模型**；三台 Mac 各自向 HTTPS Hub 长轮询。Lodestar 通知通道必须放在能读取本机 `agent-project-client.json` 并访问本机 loopback daemon 的 Mac，不能让云主机访问 Mac 的 localhost。
+
+从自有 fork 安装时先 `git clone` 并 checkout 审核过的提交，再设置 `AGENT_AUTOLOOP_REPO="$PWD"` 运行该 checkout 的 `install.sh`。本地安装器只克隆仓库 HEAD，未提交文件不会被安装；不要在另一个目录执行上游脚本后声称装的是当前 fork。真实部署还需另行配置 DNS/TLS、Git 权限、三台 Mac 的 Lodestar project/identity/binding 和飞书应用，隔离测试不证明这些步骤已经完成。
+
 ## 写第一条规则
 
 安装验证完成后，按用户希望自动处理的事从 [README 的场景模板](README.md#拿来即用的场景模板)选一个，再照[配置手册](skills/agent-autoloop/SKILL.md)写规则；用户还没指定用途时再问。用 `agent-autoloop check` 检查；改动几秒内生效。

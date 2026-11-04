@@ -1,5 +1,7 @@
 // A hub, from the outside: how a worker, a channel or the command line reaches it. Nothing here is more than an HTTP
 // request, which is the whole of what it takes to plug into the hub.
+import type { ProjectTaskInput, TaskMutationRequest } from "./project-tasks.ts";
+import type { Started } from "./validate.ts";
 export class HubError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -35,8 +37,7 @@ export function hubClient(url: string, key: string) {
       const query = { claim, wait: String(wait), running: running.join(","), capacity: capacity ? "1" : "0" };
       return call("GET", `/v1/work?${new URLSearchParams(query)}`, { timeout: wait + 30 });
     },
-    started: (run: number, token: string, body: { session?: string; link?: string }) =>
-      call("POST", `/v1/runs/${run}/started`, { token, body }),
+    started: (run: number, token: string, body: Started) => call("POST", `/v1/runs/${run}/started`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
@@ -48,6 +49,12 @@ export function hubClient(url: string, key: string) {
       call("POST", `/v1/cards/${card}/answer`, { body }),
     // Sources, the owner and tasks elsewhere.
     event: (body: unknown) => call("POST", "/v1/events", { body }),
+    submitProjectTask: (body: ProjectTaskInput) => call("POST", "/v1/project-tasks", { body }),
+    projectTask: (taskId: string) => call("GET", `/v1/project-tasks/${encodeURIComponent(taskId)}`),
+    cancelProjectTask: (taskId: string, body: TaskMutationRequest) =>
+      call("POST", `/v1/project-tasks/${encodeURIComponent(taskId)}/cancel`, { body }),
+    recheckProjectTask: (taskId: string, body: TaskMutationRequest) =>
+      call("POST", `/v1/project-tasks/${encodeURIComponent(taskId)}/recheck`, { body }),
     tell: (body: unknown) => call("POST", "/v1/tell", { body }),
     why: (id: number) => call("GET", `/v1/runs/${id}/why`),
     removeKey: (kind: string, name: string) =>

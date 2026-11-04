@@ -19,9 +19,12 @@ fi
 scope=docs
 while IFS= read -r file; do
   case "$file" in
+    # The executable project-workflow contract test reads these public surfaces and fixtures.
+    examples/recipes/project-workflow/* | plugins/lodestar/* | tests/project-workflow-*.test.ts | sim/project-workflow.test.ts) kind=normal ;;
+    docs/protocol.md | docs/plugins.md | docs/architecture.svg | skills/agent-autoloop/SKILL.md) kind=normal ;;
+    README.md | README.en.md | INSTALL.md | SECURITY.md) kind=normal ;;
     # tests/example-plugins.test.ts runs the commands in this tutorial.
-    docs/plugins.md) kind=normal ;;
-    README.md | README.en.md | INSTALL.md | SECURITY.md | CONTRIBUTING.md | AGENTS.md | LICENSE) kind=docs ;;
+    CONTRIBUTING.md | AGENTS.md | LICENSE) kind=docs ;;
     docs/* | .github/ISSUE_TEMPLATE/* | .github/pull_request_template.md) kind=docs ;;
     tests/simulation.test.ts) kind=full ;;
     plugins/* | examples/* | skills/* | worker/* | host/* | cli/* | bin/* | scripts/* | tests/* | install.sh) kind=normal ;;

@@ -6,7 +6,7 @@ import { simulate } from "../sim/random.ts";
 import { enumerate } from "../sim/enumerate.ts";
 import { World } from "../sim/world.ts";
 import { AuthError } from "../kernel/errors.ts";
-import { empty, evolve } from "../kernel/evolve.ts";
+import { empty, evolve, type Fact } from "../kernel/evolve.ts";
 import { invariants } from "../sim/invariants.ts";
 
 test("200000 deterministic fault steps preserve safety and recovered work terminates", () => {
@@ -72,4 +72,126 @@ test("the simulation catches omitted deadlines that strand deferred work", () =>
   } finally {
     World.prototype.act = original;
   }
+});
+
+test("project workflow invariants reject duplicate active stages and completion without verified evidence", () => {
+  const workflow = {
+    entry: "verify",
+    max_transitions: 2,
+    stages: {
+      verify: {
+        route: "one",
+        mode: "inspect",
+        max_visits: 2,
+        on: { verified: "$complete", blocked: "$human", execution_failed: "$human" },
+        checks: [{ name: "proof", argv: ["node", "--version"], timeout_ms: 1000 }],
+      },
+    },
+    git: {
+      remote: "file:///tmp/x.git",
+      base_ref: "refs/heads/main",
+      task_ref_prefix: "refs/heads/tasks/",
+      artifact_paths: [],
+    },
+    human: { options: [] },
+  };
+  const duplicate = new World();
+  const duplicateFact: Fact = {
+    version: 1,
+    seq: duplicate.view.seq + 1,
+    at: 1,
+    type: "forged-task",
+    changes: [
+      {
+        table: "project_tasks",
+        key: "task-forged",
+        row: {
+          task_id: "task-forged",
+          state: "queued",
+          workflow: JSON.stringify(workflow),
+          visits: JSON.stringify({ verify: 2 }),
+          transitions: 0,
+          execution_count: 2,
+          current_execution: "exec-1",
+        },
+      },
+      ...[1, 2].flatMap((id) => [
+        {
+          table: "stage_executions" as const,
+          key: `exec-${id}`,
+          row: {
+            execution_id: `exec-${id}`,
+            task_id: "task-forged",
+            run_id: id,
+            stage_id: "verify",
+            state: "queued",
+          },
+        },
+        {
+          table: "runs" as const,
+          key: String(id),
+          row: {
+            id,
+            task_id: "task-forged",
+            execution_id: `exec-${id}`,
+            state: "queued",
+            grp: "task",
+            lane: `lane-${id}`,
+          },
+        },
+      ]),
+    ],
+  };
+  const duplicateView = evolve(duplicate.view, [duplicateFact]);
+  assert.throws(() => invariants(duplicateView, [...duplicate.log, duplicateFact]), /多个活动执行/);
+
+  const unverified = new World();
+  const unverifiedFact: Fact = {
+    version: 1,
+    seq: unverified.view.seq + 1,
+    at: 1,
+    type: "forged-completion",
+    changes: [
+      {
+        table: "project_tasks",
+        key: "task-complete",
+        row: {
+          task_id: "task-complete",
+          state: "completed",
+          workflow: JSON.stringify(workflow),
+          visits: JSON.stringify({ verify: 1 }),
+          transitions: 1,
+          execution_count: 1,
+          current_execution: "exec-complete",
+          current_revision: "a".repeat(40),
+        },
+      },
+      {
+        table: "stage_executions",
+        key: "exec-complete",
+        row: {
+          execution_id: "exec-complete",
+          task_id: "task-complete",
+          run_id: 1,
+          stage_id: "verify",
+          state: "finished",
+          result: JSON.stringify({ verdict: "blocked", checks: [] }),
+        },
+      },
+      {
+        table: "runs",
+        key: "1",
+        row: {
+          id: 1,
+          task_id: "task-complete",
+          execution_id: "exec-complete",
+          state: "done",
+          grp: "task",
+          lane: "task-complete",
+        },
+      },
+    ],
+  };
+  const unverifiedView = evolve(unverified.view, [unverifiedFact]);
+  assert.throws(() => invariants(unverifiedView, [...unverified.log, unverifiedFact]), /没有 verified/);
 });

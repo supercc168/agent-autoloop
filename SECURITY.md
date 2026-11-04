@@ -17,6 +17,16 @@
 - 本项目只启动你自己安装、自己登录的官方命令行工具，不接触、不保存、不中转它们的登录凭据。
 - 浏览器能力由 Agent 自己的工具配置提供；专用入口只从可信规则或 Skill 取得，不从事件正文取命令。中台不自动授予浏览器权限或接管桌面会话。需本人恢复的连接或验证用 `ask` 交回，保留未验收项。
 
+## 项目工作流与 Lodestar
+
+[`project-workflow` recipe](examples/recipes/project-workflow/README.md) 的 workflow/route/worker/cwd/project/identity/command/Git/check/access 来自可信规则冻结快照，不接受任务资料覆盖。Lodestar 适配器要求 `access: full`；`inspect` 只做前后 Git 不变检查，不是额外的只读沙箱。独立审核使用不同 worker/私有 clone，系统账号、容器与 Git 服务端权限仍由部署者负责。
+
+本机 `agent-project-client.json` 只允许普通项目 admission/status/cancel，不能做 operator reconciliation。`agent-operator-client.json` 是单独的本机 capability，不能复制给云 Hub、worker、通道、任务资料或 Git。只有操作者已在 API 之外核实原生进程停止后才能记录 `operator_attested`；这只是有 provenance 的人工声明，仍需 Hub owner 明确决定下一步。
+
+准入、停止或结果不确定时，`unknown` 保留旧 execution 和绑定，**不自动重试**、不换机器、不用 wrapper 退出冒充远端停止。binding 变化先恢复原 owner；取消只有远端确认停止后才是 cancelled，迟到完成保留为 late outcome。
+
+云 Hub 应只监听 loopback，由 HTTPS 反向代理对外。三台 Mac 主动连接；Lodestar notify 通道和 client file 留在运行它的 Mac。示例使用虚构密钥/地址，隔离测试不证明真实 DNS、TLS、Git、Lodestar 或飞书部署安全。
+
 ## 插件与交付
 
 插件是安装者信任的本地代码，安装目录的同名插件优先；`agent-autoloop add` 只克隆，不运行安装脚本，但之后加载入口就会执行它。事件不能指定插件、仓库、命令或权限。

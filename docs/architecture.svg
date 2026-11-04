@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 680" role="img" aria-labelledby="t">
-<title id="t">Agent Autoloop 架构图：内核在中间，其他都是插件</title>
+<title id="t">Agent Autoloop 架构图：普通事项和有界项目工作流共用内核</title>
 <defs>
 <style>
 svg{--bg:#faf9f5;--ink:#1d1c19;--muted:#6e6b64;--line:#d6d3cb;--card:#fff;--item:#f4f2ec;--accent:#c2491d;--core:#1d1c19;--core-ink:#faf9f5;--core-duty:#33302a;--core-chip:#282621;--core-line:#423f38;--core-sub:#b9b5ab;--core-accent:#ef8a62;--tag-bg:#3d261c;--tag-ink:#ffb08e;--you-bg:#fff4ee}
@@ -72,12 +72,12 @@ text{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans CJK S
 <!-- 中：Autoloop 内核 -->
 <rect class="core" x="250" y="68" width="460" height="316" rx="22"/>
 <text x="272" y="103" class="ct">Autoloop 内核</text>
-<text x="688" y="101" class="cs" text-anchor="end">约 1650 行 · 零依赖 · 确定性</text>
+<text x="688" y="101" class="cs" text-anchor="end">零依赖 · 确定性 · 事实日志</text>
 
 <!-- 内核核心职责 -->
 <rect class="duty" x="268" y="116" width="424" height="52" rx="10"/>
-<text x="480" y="139" class="cn" text-anchor="middle">按你的规则分派任务</text>
-<text x="480" y="158" class="cd" text-anchor="middle">决定交给哪个 Agent、去哪个目录干 · 同一件事自动合并</text>
+<text x="480" y="139" class="cn" text-anchor="middle">普通事项与项目工作流共用队列</text>
+<text x="480" y="158" class="cd" text-anchor="middle">可信规则固定 Agent、目录、权限与有界阶段 · 所有变化写入事实日志</text>
 
 <!-- 4 个内核机制标签 -->
 <rect class="chip" x="268" y="180" width="424" height="40" rx="9"/>

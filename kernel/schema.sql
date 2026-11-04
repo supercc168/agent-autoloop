@@ -46,6 +46,50 @@ CREATE TABLE run_events (
   PRIMARY KEY (run_id, event_id)
 );
 
+CREATE TABLE project_tasks (
+  task_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  input_hash TEXT NOT NULL,
+  input TEXT NOT NULL,
+  workflow_name TEXT NOT NULL,
+  workflow TEXT NOT NULL,
+  routes TEXT NOT NULL,
+  rules_version INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  transitions INTEGER NOT NULL,
+  visits TEXT NOT NULL,
+  execution_count INTEGER NOT NULL,
+  current_stage TEXT,
+  current_execution TEXT,
+  current_revision TEXT,
+  human_card INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE stage_executions (
+  execution_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  sequence INTEGER NOT NULL,
+  stage_id TEXT NOT NULL,
+  run_id INTEGER NOT NULL,
+  request_id TEXT NOT NULL,
+  state TEXT NOT NULL,
+  input_revision TEXT,
+  input_resolution TEXT,
+  output_revision TEXT,
+  verdict TEXT,
+  progress TEXT,
+  result TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+);
+
 CREATE TABLE cards (
   id INTEGER PRIMARY KEY,
   key TEXT NOT NULL,

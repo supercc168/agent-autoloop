@@ -1,4 +1,5 @@
-import type { Rule } from "../kernel/rules.ts";
+import type { Rule, WorkflowHumanOption } from "../kernel/rules.ts";
+import type { AcceptedStageEvidence, JobStage, ProjectTaskInput } from "./project-tasks.ts";
 export type Job = {
   run: number;
   token: string;
@@ -16,7 +17,24 @@ export type Job = {
   };
   session: string | null;
   askFirst: string[];
+  stage?: JobStage;
   context: {
+    task?: Omit<ProjectTaskInput, "id"> & { task_id: string; source: string };
+    stage_evidence?: AcceptedStageEvidence[];
+    task_decisions?: {
+      card: number;
+      generation: number;
+      execution_id: string;
+      revision: string | null;
+      title: string;
+      options: WorkflowHumanOption[];
+      choice: number | null;
+      text: string | null;
+      by: string | null;
+      at: string | null;
+      text_by: string | null;
+      text_at: string | null;
+    }[];
     events: {
       id: string;
       source: string;

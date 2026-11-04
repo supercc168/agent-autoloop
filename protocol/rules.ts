@@ -3,6 +3,7 @@
 // message saying where: at start it stops the hub, later it leaves the old rules running and the owner is told.
 import { nextRun, parseCron } from "../kernel/cron.ts";
 import { SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
+import { STAGE_VERDICTS } from "./project-tasks.ts";
 
 export class RulesError extends Error {
   readonly issues: string[];
@@ -29,7 +30,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isWords: Check = (value) => Array.isArray(value) && value.every(isText);
 const isSomeWords: Check = (value) => isWords(value) && (value as string[]).length > 0;
 const isId: Check = (value) => typeof value === "string" && ID.test(value);
-const isCount: Check = (value) => Number.isInteger(value) && (value as number) > 0;
+const isCount: Check = (value) => Number.isSafeInteger(value) && (value as number) > 0;
 const isTypes: Check = (value) => isSomeWords(value) && (value as string[]).every((type) => TYPE_PATTERN.test(type));
 const isCron: Check = (value) => typeof value === "string" && parseCron(value) !== null;
 
@@ -78,6 +79,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["parallel", isCount, "要是正整数", true],
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
+    ["workflow", isId, ID_WORDS, true],
   ]);
   if (isObject(when) && "source" in when) {
     checkFields(issues, `${where}的 when `, when, [
@@ -106,6 +108,157 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
   rule.tell ??= "needed";
 }
 
+const isRef = (value: unknown) =>
+  typeof value === "string" &&
+  /^refs\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) &&
+  !value.endsWith("/") &&
+  !value.includes("..") &&
+  !value.includes("@{") &&
+  !value.includes("//");
+const isRefPrefix = (value: unknown) => typeof value === "string" && value.endsWith("/") && isRef(value.slice(0, -1));
+const isRemote = (value: unknown) =>
+  typeof value === "string" &&
+  value.trim() === value &&
+  (/^(?:https?|ssh|file):\/\/[^\s]+$/.test(value) ||
+    /^git@[A-Za-z0-9.-]+:[^\s]+$/.test(value) ||
+    value.startsWith("/"));
+const isArtifactPath = (value: unknown) =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= 500 &&
+  !value.startsWith("/") &&
+  !value.includes("\\") &&
+  !value.split("/").some((part) => part === "" || part === "." || part === "..");
+
+function checkWorkflow(issues: string[], name: string, workflow: unknown, rules: Rules) {
+  const where = `workflow ${name} `;
+  checkFields(issues, where, workflow, [
+    ["entry", isId, ID_WORDS],
+    ["max_transitions", isCount, "要是正的安全整数"],
+    ["stages", isObject, "要是一个对象"],
+    ["git", isObject, "要是一个对象"],
+    ["recheck", isId, ID_WORDS, true],
+    ["human", isObject, "要是一个对象"],
+  ]);
+  if (!isObject(workflow)) return;
+  const stages = isObject(workflow.stages) ? workflow.stages : {};
+  if (!Object.keys(stages).length) issues.push(`${where}的 stages 不能为空`);
+  for (const [stageId, stage] of Object.entries(stages)) {
+    const stageWhere = `${where}stage ${stageId} `;
+    if (!ID.test(stageId)) issues.push(`${stageWhere}的编号${ID_WORDS}`);
+    checkFields(issues, stageWhere, stage, [
+      ["route", isText, NOT_EMPTY],
+      ["mode", (value) => value === "write" || value === "inspect", "只能是 write 或 inspect"],
+      ["max_visits", isCount, "要是正的安全整数"],
+      ["on", isObject, "要是一个对象"],
+      ["checks", Array.isArray, "要是一个列表"],
+    ]);
+    if (!isObject(stage)) continue;
+    const route = rules.rules.find((candidate) => candidate.name === stage.route);
+    if (!route) issues.push(`${stageWhere}的 route 不存在：${String(stage.route)}`);
+    else if (route.workflow) issues.push(`${stageWhere}的 route 不能引用工作流入口：${route.name}`);
+    if (isObject(stage.on)) {
+      if (!Object.keys(stage.on).length) issues.push(`${stageWhere}的 on 不能为空`);
+      for (const [verdict, target] of Object.entries(stage.on)) {
+        if (!STAGE_VERDICTS.includes(verdict as (typeof STAGE_VERDICTS)[number])) {
+          issues.push(`${stageWhere}的 on 有不认识的 verdict ${verdict}`);
+        }
+        if (
+          typeof target !== "string" ||
+          (!["$complete", "$human", "$failed"].includes(target) && !(target in stages))
+        ) {
+          issues.push(`${stageWhere}的 ${verdict} 指向不存在的 stage：${String(target)}`);
+        }
+      }
+      for (const verdict of ["blocked", "execution_failed"]) {
+        if (!(verdict in stage.on)) issues.push(`${stageWhere}的 on 缺少 ${verdict}`);
+      }
+    }
+    if (Array.isArray(stage.checks)) {
+      if (stage.checks.length > 100) issues.push(`${stageWhere}的 checks 最多 100 项`);
+      const names = new Set<string>();
+      for (const [index, check] of stage.checks.entries()) {
+        const checkWhere = `${stageWhere}check ${index} `;
+        checkFields(issues, checkWhere, check, [
+          ["name", isText, NOT_EMPTY],
+          ["argv", isSomeWords, "要是非空命令参数列表"],
+          ["timeout_ms", isCount, "要是正的安全整数"],
+        ]);
+        if (isObject(check) && typeof check.name === "string") {
+          if (names.has(check.name)) issues.push(`${stageWhere}的 check 名称重复：${check.name}`);
+          names.add(check.name);
+        }
+      }
+    }
+  }
+  if (typeof workflow.entry === "string" && !(workflow.entry in stages)) {
+    issues.push(`${where}的 entry 指向不存在的 stage：${workflow.entry}`);
+  }
+  if (typeof workflow.recheck === "string" && !(workflow.recheck in stages)) {
+    issues.push(`${where}的 recheck 指向不存在的 stage：${workflow.recheck}`);
+  }
+  if (isObject(workflow.git)) {
+    checkFields(issues, `${where}git `, workflow.git, [
+      ["remote", isRemote, "要是显式 URL 或绝对路径，不能是仓库内 alias"],
+      ["base_ref", isRef, "要是完整且安全的 refs/ 引用"],
+      ["task_ref_prefix", isRefPrefix, "要是以 / 结尾的完整安全 refs/ 前缀"],
+      [
+        "artifact_paths",
+        (value) => Array.isArray(value) && value.length <= 100 && value.every(isArtifactPath),
+        "要是最多 100 个安全相对路径",
+      ],
+    ]);
+    if (
+      Array.isArray(workflow.git.artifact_paths) &&
+      new Set(workflow.git.artifact_paths).size !== workflow.git.artifact_paths.length
+    ) {
+      issues.push(`${where}git 的 artifact_paths 不能重复`);
+    }
+  }
+  if (isObject(workflow.human)) {
+    checkFields(issues, `${where}human `, workflow.human, [
+      ["options", (value) => Array.isArray(value) && value.length > 0 && value.length <= 10, "要有 1 到 10 项"],
+    ]);
+    const labels = new Set<string>();
+    if (Array.isArray(workflow.human.options)) {
+      for (const [index, option] of workflow.human.options.entries()) {
+        const optionWhere = `${where}human option ${index} `;
+        checkFields(issues, optionWhere, option, [
+          ["label", (value) => isText(value) && [...(value as string)].length <= 200, "要是 200 字以内的文字"],
+          [
+            "action",
+            (value) => ["resume", "retry", "fail", "cancel"].includes(value as string),
+            "action 只能是 resume、retry、fail 或 cancel",
+          ],
+          ["stage", isId, ID_WORDS, true],
+        ]);
+        if (!isObject(option)) continue;
+        if (option.action === "resume" && (typeof option.stage !== "string" || !(option.stage in stages))) {
+          issues.push(`${optionWhere}的 resume 要指向已有 stage`);
+        }
+        if (option.action !== "resume" && option.stage !== undefined) {
+          issues.push(`${optionWhere}只有 resume 能写 stage`);
+        }
+        if (typeof option.label === "string") {
+          if (labels.has(option.label)) issues.push(`${where}human 的 label 重复：${option.label}`);
+          labels.add(option.label);
+        }
+      }
+    }
+  }
+}
+
+function typePatternsOverlap(left: string[], right: string[]) {
+  return left.some((a) =>
+    right.some((b) => {
+      if (a === "*" || b === "*" || a === b) return true;
+      if (a.endsWith(".*") && b.startsWith(a.slice(0, -1))) return true;
+      if (b.endsWith(".*") && a.startsWith(b.slice(0, -1))) return true;
+      return false;
+    }),
+  );
+}
+
 export function parseRules(json: string, now: number, timezone: string): Rules {
   let parsed: unknown;
   try {
@@ -121,6 +274,7 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     ["agents", isObject, "要是一个对象"],
     ["channels", isObject, "要是一个对象", true],
     ["rules", Array.isArray, "要是一个列表"],
+    ["workflows", isObject, "要是一个对象", true],
     ["elsewhere", Array.isArray, "要是一个列表", true],
   ]);
   if (issues.length) throw new RulesError(issues);
@@ -128,6 +282,7 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
   rules.timezone ??= timezone;
   rules.askFirst ??= ASK_FIRST;
   rules.channels ??= {};
+  rules.workflows ??= {};
   rules.elsewhere ??= [];
   if (SCHEDULE in rules.sources) issues.push(`来源 ${SCHEDULE} 是保留的，定时用规则的 cron`);
   for (const [id, source] of Object.entries(rules.sources)) {
@@ -159,9 +314,38 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
       ["timeout", isCount, "要是正整数（分钟）", true],
     ]);
     if (isObject(agent)) agent.access ??= "edit";
+    if (isObject(agent) && agent.use === "lodestar" && agent.access !== "full") {
+      issues.push(`Agent ${id} 的 Lodestar 调用目前只支持显式 access: full`);
+    }
   }
   const names = new Set<string>();
   for (const rule of rules.rules) checkRule(issues, rules, rule, names, now);
+  for (const [name, workflow] of Object.entries(rules.workflows)) {
+    if (!ID.test(name)) issues.push(`workflow 的编号${ID_WORDS}：${name}`);
+    checkWorkflow(issues, name, workflow, rules);
+  }
+  const workflowIntake = rules.rules.filter(
+    (rule) => isObject(rule) && rule.workflow && isObject(rule.when) && "source" in rule.when,
+  );
+  for (const rule of rules.rules) {
+    if (isObject(rule) && typeof rule.workflow === "string" && !(rule.workflow in rules.workflows)) {
+      issues.push(`规则「${rule.name}」的 workflow 不存在：${rule.workflow}`);
+    }
+  }
+  for (let left = 0; left < workflowIntake.length; left++) {
+    const a = workflowIntake[left];
+    for (let right = left + 1; right < workflowIntake.length; right++) {
+      const b = workflowIntake[right];
+      if (
+        "source" in a.when &&
+        "source" in b.when &&
+        a.when.source === b.when.source &&
+        typePatternsOverlap(a.when.types, b.when.types)
+      ) {
+        issues.push(`工作流入口「${a.name}」和「${b.name}」的 source/type 重叠`);
+      }
+    }
+  }
   if (issues.length) throw new RulesError(issues);
   const limits = new Map<string, number | undefined>();
   for (const { group, parallel } of rules.rules) {

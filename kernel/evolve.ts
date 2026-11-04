@@ -5,6 +5,8 @@ export const TABLES = [
   "events",
   "runs",
   "run_events",
+  "project_tasks",
+  "stage_executions",
   "cards",
   "deliveries",
   "timers",
@@ -23,6 +25,8 @@ const indexes: Partial<Record<Table, string[][]>> = {
   events: [["source", "key"], ["routed", "id"], ["id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
   run_events: [["run_id"], ["event_id"]],
+  project_tasks: [["source", "source_id"], ["state", "updated_at"], ["task_id"]],
+  stage_executions: [["task_id", "sequence"], ["run_id"], ["state", "task_id"]],
   cards: [
     ["key", "id"],
     ["state", "id"],
@@ -172,6 +176,8 @@ export class View {
 export function keyOf(table: Table, row: Row): string {
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
+  if (table === "project_tasks") return row.task_id;
+  if (table === "stage_executions") return row.execution_id;
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;
   if (table === "schedules") return row.rule;
   if (table === "seen" || table === "keys") return `${row.kind}:${row.name}`;
