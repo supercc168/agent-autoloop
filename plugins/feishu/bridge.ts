@@ -379,7 +379,8 @@ export class Bridge {
       !object(value) ||
       value.type !== "im.message.receive_v1" ||
       value.sender_type !== "user" ||
-      value.message_type !== "text" ||
+      !["text", "post"].includes(value.message_type) ||
+      value.chat_type !== "p2p" ||
       typeof value.content !== "string" ||
       value.content.length > 5000 ||
       !/^om_[A-Za-z0-9_-]{1,200}$/.test(value.message_id ?? "") ||

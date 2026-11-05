@@ -172,7 +172,7 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 
 `plugins/feishu/bridge.ts` 是独立的来源/本人客户端，通过外部官方 `lark-cli` 长连接接收私聊，再调用上述 HTTP 协议；它不是内核内的飞书连接，也不改变任何现有 API 的角色权限。配置和启动见 [`feishu-orders` recipe](../examples/recipes/feishu-orders/README.md)。
 
-入口用短时码配对准确的用户 `open_id` 与私聊 `chat_id`，路线别名从可信配置映射固定 `type`。`kind: "event"` 调用 `/v1/events`，支持普通非 Git 目录；`kind: "workflow"` 调用 `/v1/project-tasks`，沿用有界工作流的完整 Git 合同。任务文字只能提供目标资料，不能指定 worker、目录、身份、权限、命令或 Git 策略。空路线可先接通和配对，不会派出任务。
+入口接收普通文字与官方 CLI 转换成文字的富文本私聊（`text` / `post`），两者使用相同的严格指令格式、短时码配对及用户 `open_id` 与私聊 `chat_id` 校验；其它消息类型和群聊不能作为下单指令。路线别名从可信配置映射固定 `type`。`kind: "event"` 调用 `/v1/events`，支持普通非 Git 目录；`kind: "workflow"` 调用 `/v1/project-tasks`，沿用有界工作流的完整 Git 合同。任务文字只能提供目标资料，不能指定 worker、目录、身份、权限、命令或 Git 策略。空路线可先接通和配对，不会派出任务。
 
 提交使用来源密钥，不在正文伪造 `source`。查询、停止与复查仍需要 owner 密钥；该可选凭据只留在服务端，入口还要求订单属于自己持久关联的来源、用户和私聊。用户给任意 Hub 编号不能绕过关联校验，来源 key 本身没有获得管理权限。
 

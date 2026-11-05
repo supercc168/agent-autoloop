@@ -131,6 +131,34 @@ test("pairing is one-time, expiring, private, and bound to both sender and chat"
   assert.deepEqual(f.logs, []);
 });
 
+test("plain CLI-rendered post messages support private pairing and orders without admitting other content types", async (t) => {
+  const f = await fixture(t, { routes: { mini: { kind: "event", type: "notes.request" } } });
+  f.setHandler(() => ({ body: { event: 4, duplicate: false, routed: ["notes"] } }));
+  for (const messageType of ["image", "file", "interactive", "audio"]) {
+    await f.bridge.handleMessage(
+      message(`om_unsupported_${messageType}`, "配对 pairing-test-code", { message_type: messageType }),
+    );
+  }
+  await f.bridge.handleMessage(
+    message("om_post_bot", "配对 pairing-test-code", { message_type: "post", sender_type: "bot" }),
+  );
+  await f.bridge.handleMessage(
+    message("om_post_group", "配对 pairing-test-code", { message_type: "post", chat_type: "group" }),
+  );
+  assert.equal(f.replies.length, 0);
+  assert.equal(Object.keys(f.bridge.state.messages).length, 0);
+  await f.bridge.handleMessage(message("om_post_pair", "配对 pairing-test-code", { message_type: "post" }));
+  assert.match(f.replies.at(-1)!.text, /配对成功/);
+  await f.bridge.handleMessage(message("om_post_order", "下单 mini\n检查登录并报告结果", { message_type: "post" }));
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].path, "/v1/events");
+  assert.equal(f.calls[0].body.detail, "检查登录并报告结果");
+  await f.bridge.handleMessage(
+    message("om_post_paired_group", "下单 mini\n不应派发", { message_type: "post", chat_type: "group" }),
+  );
+  assert.equal(f.calls.length, 1);
+});
+
 test("empty routes fail closed; missing or expired pairing cannot authorize an order", async (t) => {
   const f = await fixture(t, { pairing: { sha256: hash("pairing-test-code"), expires_at: "2000-01-01T00:00:00Z" } });
   await f.bridge.handleMessage(message("om_expired", "配对 pairing-test-code"));
