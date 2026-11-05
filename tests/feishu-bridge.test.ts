@@ -194,6 +194,100 @@ test("plain CLI-rendered post messages support private pairing and orders withou
   assert.equal(f.calls.length, 1);
 });
 
+test("group mode pairs one operator and conversation, survives restart, and preserves deduplication", async (t) => {
+  const f = await fixture(t, { chat_type: "group", routes: { mini: { kind: "event", type: "notes.request" } } });
+  f.setHandler(() => ({ body: { event: 4, duplicate: false, routed: ["notes"] } }));
+  const group = (id: string, content: string, extra = {}) =>
+    message(id, content, { chat_type: "group", chat_id: "oc_group", ...extra });
+  await f.bridge.handleMessage(message("om_group_mode_private", "配对 pairing-test-code"));
+  assert.equal(f.replies.length, 0);
+  await f.bridge.handleMessage(group("om_group_pair", "配对 pairing-test-code", { message_type: "post" }));
+  assert.match(f.replies.at(-1)!.text, /配对成功/);
+  assert.match(f.replies.at(-1)!.text, /当前群/);
+  assert.equal(f.bridge.state.binding?.chat_type, "group");
+  const order = group("om_group_order", "下单 mini\n检查登录");
+  await f.bridge.handleMessage(order);
+  assert.equal(f.calls.length, 1);
+  const id = /O[0-9a-f]{24}/.exec(f.replies.at(-1)!.text)![0];
+  const before = f.replies.length;
+  for (const [index, command] of [
+    `查询 ${id}`,
+    `停止 ${id}`,
+    `复查 ${id}`,
+    "配对 pairing-test-code",
+    "下单 mini\n越权任务",
+  ].entries()) {
+    await f.bridge.handleMessage(group(`om_group_other_user_${index}`, command, { sender_id: "ou_other" }));
+    await f.bridge.handleMessage(group(`om_group_other_chat_${index}`, command, { chat_id: "oc_other_group" }));
+    await f.bridge.handleMessage(group(`om_group_wrong_type_${index}`, command, { chat_type: "p2p" }));
+  }
+  assert.equal(f.replies.length, before);
+  assert.equal(f.calls.length, 1);
+  f.bridge.close();
+  const replies: string[] = [];
+  const restart = new Bridge(loadBridgeConfig(f.configFile), {
+    send: async (_chat, text) => {
+      replies.push(text);
+    },
+  });
+  t.after(() => restart.close());
+  await restart.handleMessage(order);
+  assert.equal(f.calls.length, 1);
+  assert.equal(replies.length, 0);
+  await restart.handleMessage(group("om_group_after_restart", "路线", { message_type: "post" }));
+  assert.match(replies[0], /mini/);
+});
+
+test("a bound conversation cannot be reinterpreted by a mode change; legacy bindings mean private chat", async (t) => {
+  const f = await fixture(t);
+  await f.bridge.handleMessage(message("om_legacy_pair", "配对 pairing-test-code"));
+  f.bridge.close();
+  const stateFile = join(f.config.state_dir, "state.json");
+  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+  delete state.binding.chat_type;
+  writeFileSync(stateFile, JSON.stringify(state), { mode: 0o600 });
+  const legacy = new Bridge(loadBridgeConfig(f.configFile), { send: async () => {} });
+  legacy.close();
+  writeFileSync(f.configFile, JSON.stringify({ ...f.config, chat_type: "group" }), { mode: 0o600 });
+  assert.throws(() => new Bridge(loadBridgeConfig(f.configFile)), /mode|chat|会话/);
+  writeFileSync(f.configFile, JSON.stringify({ ...f.config, chat_type: "unexpected" }), { mode: 0o600 });
+  assert.throws(() => loadBridgeConfig(f.configFile), /mode|chat|会话/);
+});
+
+test("group commands remove only the exact leading trusted bot mention described by CLI metadata", async (t) => {
+  const f = await fixture(t, {
+    chat_type: "group",
+    bot_open_id: "ou_dispatch_bot",
+    routes: { mini: { kind: "event", type: "notes.request" } },
+  });
+  f.setHandler(() => ({ body: { event: 4, duplicate: false, routed: ["notes"] } }));
+  const mention = { key: "@_user_1", id: "ou_dispatch_bot", name: "Dispatch Bot" };
+  const group = (id: string, content: string, extra = {}) =>
+    message(id, content, { chat_type: "group", mentions: [mention], ...extra });
+  await f.bridge.handleMessage(
+    group("om_untrusted_mention", "@Dispatch Bot 配对 pairing-test-code", {
+      mentions: [{ ...mention, id: "ou_other_bot" }],
+    }),
+  );
+  await f.bridge.handleMessage(group("om_literal_mention", "@Dispatch Bot 配对 pairing-test-code", { mentions: [] }));
+  assert.equal(f.bridge.state.binding, undefined);
+  await f.bridge.handleMessage(group("om_mentioned_pair", "@Dispatch Bot\u2005配对 pairing-test-code"));
+  assert.match(f.replies.at(-1)!.text, /配对成功/);
+  for (const [index, prefix] of [
+    "@Dispatch Bot",
+    "@_user_1",
+    '<at user_id="ou_dispatch_bot">Dispatch Bot</at>',
+  ].entries()) {
+    await f.bridge.handleMessage(
+      group(`om_mentioned_order_${index}`, `${prefix} 下单 mini\n检查登录`, { message_type: "post" }),
+    );
+  }
+  assert.equal(f.calls.length, 3);
+  await f.bridge.handleMessage(group("om_mention_prefix_collision", "@Dispatch BotExtra 下单 mini\n不应派发"));
+  await f.bridge.handleMessage(group("om_mention_nonleading", "任意前言 @Dispatch Bot 下单 mini\n不应派发"));
+  assert.equal(f.calls.length, 3);
+});
+
 test("empty routes fail closed; missing or expired pairing cannot authorize an order", async (t) => {
   const f = await fixture(t, { pairing: { sha256: hash("pairing-test-code"), expires_at: "2000-01-01T00:00:00Z" } });
   await f.bridge.handleMessage(message("om_expired", "配对 pairing-test-code"));

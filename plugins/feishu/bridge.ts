@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 type Route = { kind: "event" | "workflow"; type: string; acceptance?: string[] };
 export type BridgeConfig = {
   hub_url: string;
+  chat_type?: "p2p" | "group";
+  bot_open_id?: string;
   source: { name: string; key_file: string };
   owner_key_file?: string;
   lark?: string;
@@ -38,6 +40,7 @@ type Message = {
   sender_type: string;
   message_type: string;
   content: string;
+  mentions?: unknown[];
 };
 type Reply = { text: string; key: string; sent: boolean };
 type RecordedMessage = { fingerprint: string; reply?: Reply; order?: string };
@@ -59,7 +62,7 @@ type State = {
   version: 1;
   hub_url: string;
   source: string;
-  binding?: { user: string; chat: string };
+  binding?: { user: string; chat: string; chat_type?: "p2p" | "group" };
   messages: Record<string, RecordedMessage>;
   orders: Record<string, Order>;
 };
@@ -153,6 +156,15 @@ export function loadBridgeConfig(file: string): BridgeConfig {
     throw new Error("Hub requires HTTPS or loopback HTTP");
   }
   config.hub_url = url.origin;
+  if (config.chat_type !== undefined && !["p2p", "group"].includes(config.chat_type)) {
+    throw new Error("invalid bridge chat mode");
+  }
+  if (
+    config.bot_open_id !== undefined &&
+    (typeof config.bot_open_id !== "string" || !/^ou_[A-Za-z0-9_-]+$/.test(config.bot_open_id))
+  ) {
+    throw new Error("invalid trusted bot open ID");
+  }
   if (
     typeof config.state_dir !== "string" ||
     !path.isAbsolute(config.state_dir) ||
@@ -288,9 +300,13 @@ export class Bridge {
         !object(this.state.orders) ||
         (this.state.binding &&
           (!/^ou_[A-Za-z0-9_-]+$/.test(this.state.binding.user) ||
-            !/^oc_[A-Za-z0-9_-]+$/.test(this.state.binding.chat)))
+            !/^oc_[A-Za-z0-9_-]+$/.test(this.state.binding.chat) ||
+            (this.state.binding.chat_type !== undefined && !["p2p", "group"].includes(this.state.binding.chat_type))))
       ) {
         throw new Error("invalid or foreign private bridge state");
+      }
+      if (this.state.binding && (this.state.binding.chat_type ?? "p2p") !== (config.chat_type ?? "p2p")) {
+        throw new Error("configured chat mode differs from the bound conversation");
       }
       this.save();
     } catch (error) {
@@ -388,12 +404,32 @@ export class Bridge {
     this.options.log?.(reason);
   }
 
+  private commandText(message: Message) {
+    const text = message.content.trim();
+    const botId = this.config.bot_open_id;
+    if (message.chat_type !== "group" || !botId || !Array.isArray(message.mentions)) return text;
+    for (const mention of message.mentions) {
+      if (!object(mention) || mention.id !== botId) continue;
+      const prefixes: string[] = [];
+      // The official CLI renders text mentions as @name and rich posts as this exact at element.
+      if (typeof mention.name === "string" && mention.name) {
+        prefixes.push(`@${mention.name}`, `<at user_id="${botId}">${mention.name}</at>`);
+      }
+      if (typeof mention.key === "string" && /^@_user_[0-9]+$/.test(mention.key)) prefixes.push(mention.key);
+      for (const prefix of prefixes) {
+        if (text.startsWith(prefix) && (text.length === prefix.length || /^\s/.test(text.slice(prefix.length))))
+          return text.slice(prefix.length).trim();
+      }
+    }
+    return text;
+  }
+
   private async processMessage(value: unknown) {
     if (!this.locked || this.signal?.aborted) return;
     if (!object(value)) return this.reject("feishu_bridge_rejected_shape");
     if (value.type !== "im.message.receive_v1") return this.reject("feishu_bridge_rejected_event_type");
     if (value.sender_type !== "user") return this.reject("feishu_bridge_rejected_sender_type");
-    if (value.chat_type !== "p2p") return this.reject("feishu_bridge_rejected_chat_type");
+    if (value.chat_type !== (this.config.chat_type ?? "p2p")) return this.reject("feishu_bridge_rejected_chat_type");
     if (!["text", "post"].includes(value.message_type)) return this.reject("feishu_bridge_rejected_message_type");
     if (typeof value.content !== "string") return this.reject("feishu_bridge_rejected_content_type");
     if (value.content.length > 5000) return this.reject("feishu_bridge_rejected_content_length");
@@ -405,7 +441,12 @@ export class Bridge {
       return this.reject("feishu_bridge_rejected_chat_id");
     const message = value as Message;
     const binding = this.state.binding;
-    if (binding && (binding.user !== message.sender_id || binding.chat !== message.chat_id))
+    if (
+      binding &&
+      (binding.user !== message.sender_id ||
+        binding.chat !== message.chat_id ||
+        (binding.chat_type ?? "p2p") !== message.chat_type)
+    )
       return this.reject("feishu_bridge_rejected_access");
     const fingerprint = hash(JSON.stringify([message.sender_id, message.chat_id, message.content]));
     const existing = this.state.messages[message.message_id];
@@ -426,7 +467,7 @@ export class Bridge {
     const record: RecordedMessage = existing ?? { fingerprint };
     this.state.messages[message.message_id] = record;
     this.save();
-    const text = message.content.trim();
+    const text = this.commandText(message);
     if (!binding) {
       const pairing = /^配对\s+(\S{1,200})$/.exec(text);
       if (pairing) {
@@ -439,10 +480,16 @@ export class Bridge {
           await this.reply(message, record, "配对码无效或已过期，请联系部署者生成新码。");
           return;
         }
-        this.state.binding = { user: message.sender_id, chat: message.chat_id };
-        await this.reply(message, record, `配对成功，后续仅接受你在当前私聊的指令。${HELP}`);
+        this.state.binding = {
+          user: message.sender_id,
+          chat: message.chat_id,
+          chat_type: this.config.chat_type ?? "p2p",
+        };
+        const location = message.chat_type === "group" ? "当前群" : "当前私聊";
+        await this.reply(message, record, `配对成功，后续仅接受你在${location}的指令。${HELP}`);
       } else if (text === "帮助" || text === "hi") {
-        await this.reply(message, record, "尚未配对。请在当前私聊发送：配对 <部署者提供的一次性配对码>。");
+        const location = message.chat_type === "group" ? "当前群" : "当前私聊";
+        await this.reply(message, record, `尚未配对。请在${location}发送：配对 <部署者提供的一次性配对码>。`);
       }
       return;
     }

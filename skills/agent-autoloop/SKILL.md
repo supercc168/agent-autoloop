@@ -46,7 +46,7 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
 2. **对方有自己的 Webhook 格式**：在 `~/.agent-autoloop/plugins/<名字>/source.ts` 写一个函数，验签并翻译成事件（见 `plugins/github/source.ts`），来源写 `"adapter": "<名字>"`，地址是 `/v1/in/<来源>`，秘密放 `~/.agent-autoloop/secrets.env` 的 `AGENT_AUTOLOOP_SECRET_<来源>`。对方要能连到中台，所以中台要在服务器上，或者用隧道。
 3. **对方推不过来，或者中台在家里**：定时跑一段脚本轮询，见 `examples/watch-github-issues.sh`。规则用 `use: "command"` 的 Agent，写上 `emits`。没新东西不花 Token。
 
-**飞书私聊下单**：从 [`feishu-orders`](../../examples/recipes/feishu-orders/README.md) 配独立入口 `plugins/feishu/bridge.ts --config <私有文件>`，通过外部已固定版本的官方 `lark-cli` 接收消息。先用短时码配对准确的 `open_id` 和私聊 `chat_id`，不信任第一位发消息者。空路线可先接通和配对；下单别名只映射可信 `type`，Agent、worker、目录、权限和命令仍由 Hub 规则决定。非 Git 普通任务走 `/v1/events`，Git 阶段工作流才走 `/v1/project-tasks`。来源密钥只提交；服务端 owner 密钥可选，仅供查询、停止和复查本入口已关联且属于配对人的订单。入口只返回下单回执和手动查询，审批与主动通知另配通道。
+**飞书下单**：从 [`feishu-orders`](../../examples/recipes/feishu-orders/README.md) 配独立入口 `plugins/feishu/bridge.ts --config <私有文件>`，通过外部已固定版本的官方 `lark-cli` 接收消息。默认 `chat_type: "p2p"`；显式设为 `group` 时在目标群实际 @ 机器人发送指令。短时码配对准确的用户 `open_id`、`chat_id` 和对话类型，不信任第一位发消息者；群内其他成员不能下单，但消息与回复对群成员可见。空路线可先接通和配对；下单别名只映射可信 `type`，Agent、worker、目录、权限和命令仍由 Hub 规则决定。非 Git 普通任务走 `/v1/events`，Git 阶段工作流才走 `/v1/project-tasks`。来源密钥只提交；服务端 owner 密钥可选，仅供查询、停止和复查本入口已关联且属于配对人的订单。入口只返回下单回执和手动查询，审批与主动通知另配通道。
 
 普通事件仅支持下单与完整归属核实后的轮次状态查询；全部停止和复查请求均明确拒绝，由管理员核查，不能因一次 `why` 显示单独归属就停止可能重新排队合并的 run。Git 工作流才提供任务停止与有界复查。原下单结果未知时发停止，只会持久封住后续重交，不冒充已接收或远端已停；查询、原消息重放与重启均遵守该限制。
 
