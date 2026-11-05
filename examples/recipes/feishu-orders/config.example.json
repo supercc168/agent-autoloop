@@ -1,0 +1,15 @@
+{
+  "hub_url": "https://autoloop.example.com",
+  "source": {
+    "name": "feishu-orders",
+    "key_file": "/var/lib/autoloop-feishu/private/source.key"
+  },
+  "lark": "/opt/lark-cli/v1.0.99/lark-cli",
+  "state_dir": "/var/lib/autoloop-feishu/state",
+  "routes": {},
+  "devices": [
+    { "id": "mac-a", "label": "Mac A" },
+    { "id": "mac-b", "label": "Mac B" },
+    { "id": "mac-c", "label": "Mac C" }
+  ]
+}

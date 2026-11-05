@@ -125,12 +125,15 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 | [用户反馈处理](examples/recipes/feedback/README.md) | 重读反馈当前状态、修复、交付核实、准备回复；需要决定时飞书问你，回答后继续 |
 | [网站巡检](examples/recipes/website-watch/README.md) | 每 5 分钟检查状态和关键内容，首次异常交给 Agent，持续异常不重复通知，恢复后更新原卡片 |
 | [飞书周报与业务摘要](examples/recipes/feishu-brief/README.md) | 周日 18 点按你的权限读汇报和指定表格，生成本地摘要；飞书只发简短摘要，完整稿留在本机 |
+| [飞书向云 Hub 下单](examples/recipes/feishu-orders/README.md) | 独立机器人私聊配对，按可信路线提交和查询普通任务或 Git 工作流；停止、复查限 Git 工作流 |
 | [云 Hub + 三台 Mac 项目工作流](examples/recipes/project-workflow/README.md) | 固定规划、实现、独立审核、有限返工和验收路线；支持普通/定时任务、停止、复查和不确定状态恢复 |
 | [PR 自动交付](skills/agent-autoloop/SKILL.md#交付流水线) | 打上 `deliver` 标签后，审查、等 CI、合并、等发布并核对线上版本 |
 
 **启用：** 打开对应说明，把任务 Skill 放进所用 Agent 的 skills 目录，把示例规则合入 `~/.agent-autoloop/rules.json`，替换电脑名和路径，再运行 `agent-autoloop check`。
 
 云 Hub + 三台 Mac 模板按其分角色安装顺序操作：四台先用 `--hub-only --no-service` 安装工具，只有 Hub 保存规则并运行 `check`，Mac 使用各自 worker 配置验证连接与认证。
+
+飞书下单是独立入口，按该模板配置外部 `lark-cli`、短时私聊配对码与来源密钥。默认空路线只供接通和配对，首条任务再登记设备、本机可信目录和可用 Agent；普通任务支持非 Git 目录，跨机器有界工作流仍须 Git 交接合同。入口先提供下单回执和手动查询，人工卡片另用已有通道。
 
 反馈处理、网站巡检和飞书摘要默认使用北京时间，只发给本人的飞书私聊。样例数据都是虚构的；脚本和回执只用本地 HTTP 与假飞书 CLI 验证过，没有在真实账号上跑过完整业务。
 
@@ -142,7 +145,7 @@ Agent 结束了这一轮，问了你一个问题。它现在不占进程、不�
 
 | 方向 | 内置 | 配置 |
 |---|---|---|
-| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
+| **事件**：怎么发现新活 | [GitHub Webhook](plugins/github/source.ts)、[飞书下单](examples/recipes/feishu-orders/README.md)、[HTTP 接口](docs/protocol.md#来源把世界变成事件)、[定时规则](skills/agent-autoloop/SKILL.md#改规则)、[Issue 轮询脚本](examples/watch-github-issues.sh) | [说明](skills/agent-autoloop/SKILL.md#接一个事件插件) |
 | **Agent**：谁来干活 | [Claude Code](plugins/claude/agent.ts)、[Codex](plugins/codex/agent.ts)、[ACP](plugins/acp/agent.ts)、[通用命令](plugins/command/agent.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个-agent) |
 | **通道**：去哪找你拍板 | [桌面通知](plugins/desktop/channel.ts)（默认开启）、[飞书](plugins/feishu/channel.ts)、[钉钉 / 企微 / Slack / Discord](plugins/webhook/templates.ts) | [说明](skills/agent-autoloop/SKILL.md#接一个通道) |
 | **交付**：把 CI/CD 也做成插件 | [`delivery`](plugins/delivery/delivery.ts) | [说明](skills/agent-autoloop/SKILL.md#交付流水线) |

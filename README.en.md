@@ -127,12 +127,15 @@ Each recipe includes rules, a task Skill, and setup instructions (written in Chi
 | [User feedback](examples/recipes/feedback/README.md) | Re-read current feedback, fix, deliver and verify, then prepare a reply; ask you in Feishu and resume after your answer |
 | [Website watch](examples/recipes/website-watch/README.md) | Check status and expected content every five minutes; wake the agent on a new incident, keep ongoing failures quiet, and update the card on recovery |
 | [Feishu weekly and business brief](examples/recipes/feishu-brief/README.md) | Read selected reports and tables with your permissions at 6 PM Sunday; summarize locally and send only a short summary to Feishu |
+| [Feishu orders for a cloud Hub](examples/recipes/feishu-orders/README.md) | Pair a private chat with a dedicated bot; submit and query ordinary tasks or Git workflows through trusted routes; cancel and recheck are limited to Git workflows |
 | [Cloud Hub + three-Mac project workflow](examples/recipes/project-workflow/README.md) | Fixed plan, implementation, independent review, bounded rework, and verification stages with submit/cancel/recheck/recovery guidance |
 | [PR delivery](skills/agent-autoloop/SKILL.md#交付流水线) | Add `deliver` to a PR to review it, wait for CI, merge, wait for deployment, and verify the live version |
 
 **To enable one:** open its instructions, put the task Skill in your agent's skills directory, merge the sample rules into `~/.agent-autoloop/rules.json`, replace worker names and paths, then run `agent-autoloop check`.
 
 For the cloud Hub + three-Mac recipe, follow its role-specific bootstrap order: install the tools on all four hosts with `--hub-only --no-service`; only the Hub keeps rules and runs `check`, while each Mac uses its own worker configuration to verify connectivity and authentication.
+
+Feishu orders use a separate process with an external `lark-cli`, a short-lived private-chat pairing code, and a source key. Empty routes let you connect and pair before registering the first trusted worker, local directory, and ready agent. Ordinary tasks may use non-Git directories; bounded workflows retain their Git handoff contract. The bridge returns submission acknowledgements and answers manual status queries; human approval cards use an existing channel.
 
 Feedback, website watch, and Feishu briefs default to Asia/Shanghai and send only to the owner's private Feishu chat. Sample data is fictional; scripts and receipts have been verified only with local HTTP and a fake Feishu CLI, not run end to end on a live account.
 
@@ -144,7 +147,7 @@ Built-in plugins ship with the program and are enabled through configuration. Us
 
 | Side | Built in | Setup |
 |---|---|---|
-| **Events**: how work is found | [GitHub Webhook](plugins/github/source.ts), [HTTP API](docs/protocol.md#来源把世界变成事件), [cron rules](skills/agent-autoloop/SKILL.md#改规则), [issue polling script](examples/watch-github-issues.sh) | [Guide](skills/agent-autoloop/SKILL.md#接一个事件插件) |
+| **Events**: how work is found | [GitHub Webhook](plugins/github/source.ts), [Feishu orders](examples/recipes/feishu-orders/README.md), [HTTP API](docs/protocol.md#来源把世界变成事件), [cron rules](skills/agent-autoloop/SKILL.md#改规则), [issue polling script](examples/watch-github-issues.sh) | [Guide](skills/agent-autoloop/SKILL.md#接一个事件插件) |
 | **Agents**: who does the work | [Claude Code](plugins/claude/agent.ts), [Codex](plugins/codex/agent.ts), [ACP](plugins/acp/agent.ts), [generic command](plugins/command/agent.ts) | [Guide](skills/agent-autoloop/SKILL.md#接一个-agent) |
 | **Channels**: how cards reach you | [Desktop notifications](plugins/desktop/channel.ts) (on by default), [Feishu](plugins/feishu/channel.ts), [DingTalk / WeCom / Slack / Discord](plugins/webhook/templates.ts) | [Guide](skills/agent-autoloop/SKILL.md#接一个通道) |
 | **Delivery**: CI/CD as a plugin | [`delivery`](plugins/delivery/delivery.ts) | [Guide](skills/agent-autoloop/SKILL.md#交付流水线) |

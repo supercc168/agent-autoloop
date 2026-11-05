@@ -74,6 +74,14 @@ Claude 要委托 Codex 处理网页时，可用[浏览器交接模板](examples/
 
 从自有 fork 安装时先 `git clone` 并 checkout 审核过的提交，再设置 `AGENT_AUTOLOOP_REPO="$PWD"` 运行该 checkout 的 `install.sh`。本地安装器只克隆仓库 HEAD，未提交文件不会被安装；不要在另一个目录执行上游脚本后声称装的是当前 fork。真实部署还需另行配置 DNS/TLS、Git 权限、三台 Mac 的 Lodestar project/identity/binding 和飞书应用，隔离测试不证明这些步骤已经完成。
 
+## 飞书下单入口
+
+需要直接从飞书给云 Hub 下单时，使用 [`feishu-orders`](examples/recipes/feishu-orders/README.md)。它以独立进程运行 `plugins/feishu/bridge.ts --config <私有文件>`，外部官方 `lark-cli` 固定到已审核的版本，并使用独立应用及私有配置目录。云端运行账号保存来源密钥；需要查询、停止和复查时另配服务端 owner 密钥。模型和三台 Mac 不接触这些管理材料。
+
+初始 `routes: {}` 可以先接通长连接，再由本人使用短时码私聊配对；没有路线不能下单，不会猜项目、创建 Git 仓库或启动模型。普通目录任务走 `/v1/events`，只支持下单与归属核实后的状态查询，停止和工作流复查都明确拒绝；完整 Git 工作流走 `/v1/project-tasks`，可按原协议查询、请求停止和复查。首单前再登记目标电脑、本机可信目录和实际就绪的 Agent。
+
+Linux 无 keychain 时，CLI 配置使用文件 Secret 引用，文件 `0600`、目录 `0700`；不要把 App Secret 放进 argv、Git 或日志。消息事件和卡片回调分别在开发者后台配置并发布。不要给另一台电脑已经连接的应用再开监听；同机相同 CLI 配置目录的消息与唯一卡片 consumer 可共用本地 bus。入口的下单回执与手动查询不等于主动进度通知，后者和人工审批另配已有通道。
+
 ## 写第一条规则
 
 安装验证完成后，按用户希望自动处理的事从 [README 的场景模板](README.md#拿来即用的场景模板)选一个，再照[配置手册](skills/agent-autoloop/SKILL.md)写规则；用户还没指定用途时再问。用 `agent-autoloop check` 检查；改动几秒内生效。
