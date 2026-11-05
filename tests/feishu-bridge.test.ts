@@ -128,7 +128,42 @@ test("pairing is one-time, expiring, private, and bound to both sender and chat"
   assert.match(f.replies.at(-1)!.text, /Mini/);
   assert.match(f.replies.at(-1)!.text, /不代表在线/);
   assert.doesNotMatch(readFileSync(join(f.config.state_dir, "state.json"), "utf8"), /pairing-test-code/);
-  assert.deepEqual(f.logs, []);
+  assert.deepEqual(f.logs, [
+    "feishu_bridge_rejected_chat_type",
+    "feishu_bridge_rejected_access",
+    "feishu_bridge_rejected_access",
+    "feishu_bridge_rejected_sender_type",
+  ]);
+});
+
+test("rejected wire shapes report only fixed categories and cannot bind, submit, or reply", async (t) => {
+  const f = await fixture(t);
+  const cases: [unknown, string][] = [
+    [null, "shape"],
+    [message("om_private_fixture", "private fixture text", { type: "private-event-value" }), "event_type"],
+    [message("om_private_fixture", "private fixture text", { sender_type: "bot" }), "sender_type"],
+    [message("om_private_fixture", "private fixture text", { chat_type: "group" }), "chat_type"],
+    [message("om_private_fixture", "private fixture text", { message_type: "image" }), "message_type"],
+    [
+      message("om_private_fixture", "private fixture text", { content: { text: "private fixture text" } }),
+      "content_type",
+    ],
+    [message("om_private_fixture", "x".repeat(5001)), "content_length"],
+    [message("private-message-value", "private fixture text"), "message_id"],
+    [message("om_private_fixture", "private fixture text", { sender_id: "private-sender-value" }), "sender_id"],
+    [message("om_private_fixture", "private fixture text", { chat_id: "private-chat-value" }), "chat_id"],
+  ];
+  for (const [event] of cases) await f.bridge.handleMessage(event);
+  assert.deepEqual(
+    f.logs,
+    cases.map(([, reason]) => `feishu_bridge_rejected_${reason}`),
+  );
+  assert.equal(f.bridge.state.binding, undefined);
+  assert.equal(Object.keys(f.bridge.state.messages).length, 0);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.replies.length, 0);
+  assert.ok(f.logs.every((line) => /^feishu_bridge_rejected_[a-z_]+$/.test(line)));
+  assert.doesNotMatch(f.logs.join("\n"), /private|om_|ou_|oc_|fixture|source-test|owner-test/);
 });
 
 test("plain CLI-rendered post messages support private pairing and orders without admitting other content types", async (t) => {

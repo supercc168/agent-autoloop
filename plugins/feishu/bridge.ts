@@ -68,6 +68,18 @@ type Options = {
   log?: (line: string) => void;
   signal?: AbortSignal;
 };
+type RejectedReason =
+  | "feishu_bridge_rejected_shape"
+  | "feishu_bridge_rejected_event_type"
+  | "feishu_bridge_rejected_sender_type"
+  | "feishu_bridge_rejected_chat_type"
+  | "feishu_bridge_rejected_message_type"
+  | "feishu_bridge_rejected_content_type"
+  | "feishu_bridge_rejected_content_length"
+  | "feishu_bridge_rejected_message_id"
+  | "feishu_bridge_rejected_sender_id"
+  | "feishu_bridge_rejected_chat_id"
+  | "feishu_bridge_rejected_access";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const object = (value: unknown): value is Record<string, any> =>
   !!value && typeof value === "object" && !Array.isArray(value);
@@ -372,26 +384,29 @@ export class Bridge {
     return next;
   }
 
+  private reject(reason: RejectedReason) {
+    this.options.log?.(reason);
+  }
+
   private async processMessage(value: unknown) {
-    if (
-      !this.locked ||
-      this.signal?.aborted ||
-      !object(value) ||
-      value.type !== "im.message.receive_v1" ||
-      value.sender_type !== "user" ||
-      !["text", "post"].includes(value.message_type) ||
-      value.chat_type !== "p2p" ||
-      typeof value.content !== "string" ||
-      value.content.length > 5000 ||
-      !/^om_[A-Za-z0-9_-]{1,200}$/.test(value.message_id ?? "") ||
-      !/^ou_[A-Za-z0-9_-]+$/.test(value.sender_id ?? "") ||
-      !/^oc_[A-Za-z0-9_-]+$/.test(value.chat_id ?? "")
-    )
-      return;
+    if (!this.locked || this.signal?.aborted) return;
+    if (!object(value)) return this.reject("feishu_bridge_rejected_shape");
+    if (value.type !== "im.message.receive_v1") return this.reject("feishu_bridge_rejected_event_type");
+    if (value.sender_type !== "user") return this.reject("feishu_bridge_rejected_sender_type");
+    if (value.chat_type !== "p2p") return this.reject("feishu_bridge_rejected_chat_type");
+    if (!["text", "post"].includes(value.message_type)) return this.reject("feishu_bridge_rejected_message_type");
+    if (typeof value.content !== "string") return this.reject("feishu_bridge_rejected_content_type");
+    if (value.content.length > 5000) return this.reject("feishu_bridge_rejected_content_length");
+    if (typeof value.message_id !== "string" || !/^om_[A-Za-z0-9_-]{1,200}$/.test(value.message_id))
+      return this.reject("feishu_bridge_rejected_message_id");
+    if (typeof value.sender_id !== "string" || !/^ou_[A-Za-z0-9_-]+$/.test(value.sender_id))
+      return this.reject("feishu_bridge_rejected_sender_id");
+    if (typeof value.chat_id !== "string" || !/^oc_[A-Za-z0-9_-]+$/.test(value.chat_id))
+      return this.reject("feishu_bridge_rejected_chat_id");
     const message = value as Message;
     const binding = this.state.binding;
-    if (binding ? binding.user !== message.sender_id || binding.chat !== message.chat_id : message.chat_type !== "p2p")
-      return;
+    if (binding && (binding.user !== message.sender_id || binding.chat !== message.chat_id))
+      return this.reject("feishu_bridge_rejected_access");
     const fingerprint = hash(JSON.stringify([message.sender_id, message.chat_id, message.content]));
     const existing = this.state.messages[message.message_id];
     if (existing) {
